@@ -1,0 +1,219 @@
+* bind-mounts: share host directories with smolvm guests
+** Overview
+bind-mounts is one Ansible playbook, driven by a single configuration file,
+that shares host directories with smolvm guests.
+
+One default run validates the configuration, attaches the configured
+host directories to each machine, bind-mounts them at their target
+paths inside each guest, installs a login hook that re-applies the
+mounts, verifies every mount, and records everything it created in a
+provenance ledger.
+
+The playbook manages any number of machines and users from the same
+file, is safe to re-run in any state, and never touches a mount or
+volume it cannot prove it created.
+
+Two modes are supported. In bind mode the playbook consolidates every
+configured directory under one share directory (share_root), attaches that
+share to each machine as a single volume, and inside the guest bind-mounts
+each entry from the share to its real target path, so one volume slot serves
+any number of directories. In direct mode every configured directory becomes
+its own smolvm volume, which is simpler inside the guest but uses one volume
+slot per directory. Switching modes is a one-line configuration change plus
+one playbook run.
+
+The mode choice exists because of a smolvm constraint: a directory attached
+directly is its own virtiofs device, and libkrun (the VMM underneath) caps
+x86_64 machines at 11 virtio-mmio IRQs, one per device. Balloon, rng,
+console, and two block devices take five; the root filesystem, the volume
+mounts, and the vsock agent channel share the rest, so a directly created
+machine fits at most 4 host volumes (3 for machines created from a packed
+.smolmachine archive), and one fewer when anything else adds a device, such
+as published ports. The ceiling lives in libkrun, and smolvm has no preflight
+for it; see [[https://github.com/smol-machines/smolvm/issues/941][issue #941]].
+bind mode makes the ceiling irrelevant to the number of shared directories;
+direct mode is subject to it.
+** 1 Quick start
+*** 1 Copy vars.yml.example to vars.yml in the repository root
+The playbook looks for vars.yml in its own directory, next to
+bind-mounts.yml; put it exactly there.
+#+BEGIN_SRC
+cp vars.yml.example vars.yml
+#+END_SRC
+
+Edit vars.yml with your machine names, users, and directories. vars.yml is
+git-ignored and must never be committed; every path in vars.yml.example is
+fictitious.
+*** 2 Run the default playbook
+#+BEGIN_SRC
+ansible-playbook bind-mounts.yml -i inventory -K
+#+END_SRC
+
+-K prompts once for the sudo password, because host sudo has no passwordless
+rule. The default run validates the configuration, bind-mounts the sources
+into share_root, starts each machine if it is stopped, installs the login
+hook, applies the guest-side bind mounts, and verifies the result. The guest
+may be running or stopped; a stopped machine is started automatically, so
+nothing needs to be stopped or started by hand first.
+*** 3 Log in and use the machines
+Log in as usual with smolvm machine exec. The mounts are already in place,
+and the installed .bash_profile hook re-applies them non-interactively at
+every login as a fallback.
+** 2 One-time volume attachment
+A machine needs the share volume attached exactly once in bind mode. Stop the
+machine, run the attach tag, then start it again.
+
+#+BEGIN_SRC
+smolvm machine stop --name my-vm
+ansible-playbook bind-mounts.yml -i inventory --tags attach
+smolvm machine start --name my-vm
+#+END_SRC
+
+attach refuses to run against a running machine and never stops anything on
+its own. A machine that already has the volume attached needs nothing: the
+default run never changes the volume set.
+** Configuration reference
+The block below shows the shape of vars.yml; every path in it is a fictitious
+example. Copy vars.yml.example to vars.yml and replace names, users, and
+directories with your own.
+
+#+BEGIN_SRC yaml
+mode: bind
+share_root: /home/you/share
+share_target: /mnt/share
+machines:
+  - name: my-vm
+    user: you
+    uid: 1000
+    gid: 1000
+    profile_path: /home/you/.bash_profile
+    max_volumes: 4
+    mounts:
+      - name: website
+        src: /home/you/projects/website
+        target: /home/you/projects/website
+        readonly: false
+        uid: 1000
+        gid: 1000
+#+END_SRC
+*** mode selects bind or direct operation
+*** share_root holds the per-mount subdirectories and the ledger
+It is required in both modes and must be an absolute path without whitespace.
+*** share_target is the guest path of the share root in bind mode
+*** machines holds one entry per smolvm machine with unique names
+**** user plus uid and gid select the account and created-dir ownership
+**** profile_path defaults to the bash profile of user in the guest
+**** max_volumes caps the volume slots per machine
+The default is 4. Machines created from a packed .smolmachine archive fit 3,
+and every extra device, such as published ports, costs one more slot; hand
+attached volumes count against the cap just like playbook-managed ones.
+**** mounts lists the shared directories
+***** src is the host directory and must exist before the run
+***** target is the absolute guest path, unique per machine
+***** name is the share subdirectory name in bind mode
+It defaults to the last path component of src. The same name and src pair on
+several machines means those machines share the subdirectory.
+***** readonly is optional in both modes
+Direct mode appends :ro to the volume; bind mode remounts the bind read-only.
+***** uid and gid override created-directory ownership
+They default to the machine-level uid and gid.
+** Tag reference
+*** The default run
+Validate, host binds, start, install, guest binds, verify. Works whether the
+guests are running or stopped.
+*** mounts
+Host binds and guest binds only. Refuses stopped machines, because guest
+binds need a running guest.
+*** install
+Refreshes the guest script, the sudoers drop-in, and the profile hook. Needs
+running machines and a root exec user.
+*** start starts stopped machines and waits for exec readiness
+*** verify checks every mount read-only after the run
+*** attach converges the volume set; machines must be stopped
+*** stop syncs each guest and stops the machines
+Tolerates machines that are already stopped.
+*** teardown undoes everything the playbook created
+Direct-mode volume removal requires stopped machines.
+
+attach, stop, and teardown are excluded from the default run; select them
+explicitly with --tags.
+** Mode switching
+*** 1 Stop the machines
+#+BEGIN_SRC
+ansible-playbook bind-mounts.yml -i inventory --tags stop
+#+END_SRC
+*** 2 Change the mode or the mount list
+Edit mode and the machines list in vars.yml.
+*** 3 Converge the volume set
+#+BEGIN_SRC
+ansible-playbook bind-mounts.yml -i inventory --tags attach
+#+END_SRC
+
+Bind to direct: every mount becomes a volume, the share volume is removed,
+and the guest-side login hook, sudoers rule, and installed script are
+removed. Direct to bind: the share volume is attached and former mount
+volumes are removed. Only volumes the ledger proves the playbook created are
+ever removed; hand-attached volumes, such as a persistent home directory, are
+untouched but still count against max_volumes.
+*** 4 Start the machines and run the default playbook
+#+BEGIN_SRC
+ansible-playbook bind-mounts.yml -i inventory --tags start
+ansible-playbook bind-mounts.yml -i inventory
+#+END_SRC
+** Safety model
+*** The provenance ledger records everything the playbook creates
+The ledger lives beside the share subdirectories and records volumes, host
+binds, guest binds, and installed artifacts per machine. Entries that are in
+the ledger and in the configuration are maintained; entries in the ledger but
+no longer in the configuration are removed; anything else is foreign and
+never touched. On the first run, existing mounts that match the
+configuration are verified and adopted into the ledger.
+*** Foreign mounts are refused, never unmounted automatically
+A target already mounted with different content than the configured source
+fails the run with the found and expected device:inode identities printed,
+together with the manual resolution path.
+*** Idempotency compares device and inode, not just mount presence
+Every check compares the device and inode of the mounted target against the
+configured source, so a stale or wrong-source mount is caught instead of
+silently skipped. Source-path comparison is deliberately avoided because the
+kernel reports bind sources in normalized form that cannot be matched by
+string equality.
+*** Volume changes fail on running machines instead of stopping them
+The attach tag refuses running machines and prints the exact commands to run;
+the playbook never stops a machine with live sessions on its own.
+*** The sudoers rule is scoped to a root-owned script copy
+The login hook runs sudo -n against the root-owned 0755 copy of the script.
+
+#+BEGIN_SRC
+<user> ALL=(root) NOPASSWD: /usr/local/sbin/bind-mount-on-guest.sh
+#+END_SRC
+
+The drop-in is validated with visudo before activation. The rule authorizes
+only the root-owned copy at /usr/local/sbin, so nothing under the
+user-writable share can run with NOPASSWD root privileges.
+*** Writes are atomic and preserve ownership and mode
+Ledger and profile edits go through a temp file and rename. The profile
+helper preserves the file owner and mode and never touches lines outside the
+managed block, which uses the standard blockinfile markers.
+*** Check mode skips every mutating task and still verifies
+** Shutdown semantics
+smolvm machine stop is graceful: the guest agent runs a full sync, flushing
+every filesystem including virtiofs, remounts the storage read-only to
+checkpoint its journal, and only then is the VMM terminated, after which the
+host fsyncs the disk files. Guest processes get no chance to clean up; it is
+sync-then-kill, like pulling power after sync, so save editor buffers first.
+The stop tag adds a redundant guest sync before stopping as belt-and-braces.
+** Troubleshooting
+*** A missing vars.yml fails fast with copy instructions
+*** A target mounted with a different source needs manual resolution
+Unmount the foreign mount, or run the teardown tag for ledger-managed binds,
+then re-run the playbook.
+*** Refused volume changes mean stop, then attach, then start
+The playbook never stops a machine with live sessions on its own.
+*** An exceeded volume budget counts hand-attached volumes too
+Remove mounts from vars.yml, or raise max_volumes only if you know the
+machine has headroom; see issue #941.
+*** An unreadable ledger disables cleanup for that run
+Fix or delete the ledger file; deleting it loses only the cleanup
+bookkeeping.
+*** Guest management needs the root exec user

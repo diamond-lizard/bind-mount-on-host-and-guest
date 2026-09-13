@@ -1,0 +1,1300 @@
+---
+# Managed install source for the smolvm host-directory sharing setup.
+# Real machine names, users, and paths live in vars.yml (git-ignored).
+# Run from the repository directory on the smolvm host:
+#   ansible-playbook bind-mounts.yml -i inventory -K          (default run)
+#   ansible-playbook bind-mounts.yml -i inventory --tags attach -K   (volume convergence)
+#   ansible-playbook bind-mounts.yml -i inventory --tags stop -K     (graceful stop)
+#   ansible-playbook bind-mounts.yml -i inventory --tags teardown -K (undo playbook-created state)
+- name: Manage smolvm share bind mounts (host and guests)
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    installed_script_guest_path: /usr/local/sbin/bind-mount-on-guest.sh
+    sudoers_dropin_guest_path: /etc/sudoers.d/010-bind-mounts
+    ledger_file_name: .bind-mounts-state.yml
+  tasks:
+
+    # ================================================================
+    # 1. Load and validate the configuration
+    # ================================================================
+    - name: Check that vars.yml exists
+      ansible.builtin.stat:
+        path: vars.yml
+      register: config_file
+      tags: [always]
+
+    - name: Require vars.yml
+      ansible.builtin.fail:
+        msg: >-
+          vars.yml was not found next to the playbook. Copy vars.yml.example to
+          vars.yml, fill in your machine names, users, and mounts, then re-run.
+      when: not config_file.stat.exists
+      tags: [always]
+
+    - name: Load config from vars.yml
+      ansible.builtin.include_vars:
+        file: vars.yml
+        name: config
+      tags: [always]
+
+    - name: Assert top-level config validity
+      ansible.builtin.assert:
+        that:
+          - config.mode is defined
+          - config.mode in ['bind', 'direct']
+          - config.machines is defined
+          - config.machines | length > 0
+          - config.share_root is defined
+          - config.share_root is match('/')
+          - config.share_root is not search('\\s')
+          - config.share_target is defined
+          - config.share_target is match('/')
+          - config.share_target is not search('\\s')
+        msg: >-
+          Invalid configuration: mode must be 'bind' or 'direct', machines must
+          be a non-empty list, and share_root / share_target must be absolute
+          paths without whitespace.
+      tags: [always]
+
+    - name: Resolve the share root to its canonical host path
+      ansible.builtin.set_fact:
+        share_root_resolved: "{{ config.share_root | realpath }}"
+      tags: [always]
+
+    - name: Build the normalized machine and mount list
+      ansible.builtin.set_fact:
+        normalized: >-
+          {%- set out = [] -%}
+          {%- for m in config.machines -%}
+          {%- set mounts = [] -%}
+          {%- for mnt in m.mounts | default([]) -%}
+          {%- set share_name = mnt.name | default(mnt.src | basename) -%}
+          {%- set _ = mounts.append({
+                'machine': m.name,
+                'user': m.user,
+                'name': share_name,
+                'src': mnt.src,
+                'target': mnt.target,
+                'readonly': mnt.readonly | default(false) | bool,
+                'uid_eff': mnt.uid | default(m.uid),
+                'gid_eff': mnt.gid | default(m.gid),
+                'share_path': config.share_target ~ '/' ~ share_name,
+              }) -%}
+          {%- endfor -%}
+          {%- set _ = out.append({
+                'name': m.name,
+                'user': m.user,
+                'uid': m.uid,
+                'gid': m.gid,
+                'profile_path': m.profile_path | default('/home/' ~ m.user ~ '/.bash_profile'),
+                'max_volumes': m.max_volumes | default(4),
+                'mounts': mounts | sort(attribute='target'),
+              }) -%}
+          {%- endfor -%}
+          {{ out }}
+      tags: [always]
+
+    - name: Flatten mounts for host-side loops
+      ansible.builtin.set_fact:
+        all_mounts: "{{ normalized | map(attribute='mounts') | flatten }}"
+      tags: [always]
+
+    - name: Assert machine names are unique
+      ansible.builtin.assert:
+        that:
+          - normalized | map(attribute='name') | list | length ==
+            (normalized | map(attribute='name') | unique | list | length)
+        msg: "Machine names in vars.yml must be unique."
+      tags: [always]
+
+    - name: Assert absolute whitespace-free mount paths
+      vars:
+        all_paths: "{{ (all_mounts | map(attribute='src') | list)
+                       + (all_mounts | map(attribute='target') | list) }}"
+      ansible.builtin.assert:
+        that:
+          - all_paths | select('match', '/') | list | length == all_paths | length
+          - all_paths | reject('search', '\\s') | list | length == all_paths | length
+        msg: >-
+          Every mount src and target must be an absolute path without
+          whitespace.
+      tags: [always]
+
+    - name: Assert guest targets are unique per machine
+      ansible.builtin.assert:
+        that:
+          - m.mounts | map(attribute='target') | list | length ==
+            (m.mounts | map(attribute='target') | unique | list | length)
+        msg: "Machine {{ m.name }} has duplicate guest targets."
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      tags: [always]
+
+    - name: Assert one share name per source directory
+      vars:
+        src_name_pairs: "{{ all_mounts | map(attribute='src') | zip(all_mounts | map(attribute='name')) }}"
+        name_src_pairs: "{{ all_mounts | map(attribute='name') | zip(all_mounts | map(attribute='src')) }}"
+      ansible.builtin.assert:
+        that:
+          - dict(src_name_pairs) | length == (src_name_pairs | unique | list | length)
+          - dict(name_src_pairs) | length == (name_src_pairs | unique | list | length)
+        msg: >-
+          Share names must map one-to-one to source directories: the same src
+          under two different names, or one name on two different srcs, is
+          rejected. (The same name+src pair on several machines is fine - those
+          machines share the subdirectory.)
+      tags: [always]
+
+    - name: Verify every source exists and is a directory on the host
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ all_mounts | map(attribute='src') | unique | list }}"
+      register: src_stats
+      tags: [always]
+
+    - name: Fail on missing or non-directory sources
+      ansible.builtin.assert:
+        that:
+          - src_stats.results[ansible_loop.index0].stat.exists
+          - src_stats.results[ansible_loop.index0].stat.isdir
+        fail_msg: "Source directory problem for {{ item }}: it must exist and be a directory on the host."
+      loop: "{{ all_mounts | map(attribute='src') | unique | list }}"
+      loop_control:
+        extended: true
+        label: "{{ item }}"
+      tags: [always]
+
+    # ================================================================
+    # 2. Gather observed state
+    # ================================================================
+    - name: Collect the host mount table
+      ansible.builtin.command: findmnt -rn -o TARGET,SOURCE,FSTYPE
+      register: host_findmnt
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: Parse the host mount table
+      ansible.builtin.set_fact:
+        host_mounts: >-
+          {%- set result = {} -%}
+          {%- for line in host_findmnt.stdout_lines -%}
+          {%- set parts = line.split() -%}
+          {%- if parts | length == 3 -%}
+          {%- set _ = result.update({parts[0]: {'source': parts[1], 'fstype': parts[2]}}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+      tags: [always]
+
+    - name: Collect the smolvm machine inventory
+      ansible.builtin.command: smolvm machine ls --verbose
+      register: smolvm_ls
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: Parse the smolvm machine inventory
+      ansible.builtin.set_fact:
+        smolvm_sections: "{{ smolvm_ls.stdout | smolvm_ls_sections }}"
+      tags: [always]
+
+    - name: Fail on configured machines missing from smolvm
+      ansible.builtin.assert:
+        that: m.name in smolvm_sections
+        msg: >-
+          Machine '{{ m.name }}' was not found in smolvm machine ls output.
+          Check for a typo in vars.yml, or create the machine first.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      tags: [always]
+
+    - name: Inspect the share root
+      ansible.builtin.stat:
+        path: "{{ share_root_resolved }}"
+      register: share_root_stat
+      tags: [always]
+
+    - name: Reject a share root that exists as a non-directory
+      ansible.builtin.assert:
+        that: not share_root_stat.stat.exists or share_root_stat.stat.isdir
+        msg: "share_root {{ config.share_root }} exists but is not a directory."
+      tags: [always]
+
+    - name: Create the share root
+      ansible.builtin.file:
+        path: "{{ share_root_resolved }}"
+        state: directory
+        mode: "0755"
+      become: true
+      when: not ansible_check_mode
+      tags: [always]
+
+    - name: Create per-mount share subdirectories (bind mode)
+      ansible.builtin.file:
+        path: "{{ share_root_resolved ~ '/' ~ item.name }}"
+        state: directory
+        mode: "0755"
+      become: true
+      loop: "{{ all_mounts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - config.mode == 'bind'
+        - not ansible_check_mode
+      tags: [always]
+
+    # ================================================================
+    # 3. Provenance ledger
+    # ================================================================
+    - name: Read the provenance ledger from the share
+      ansible.builtin.set_fact:
+        ledger_text: "{{ lookup('ansible.builtin.file', share_root_resolved ~ '/' ~ ledger_file_name, errors='ignore') | default('', true) }}"
+      tags: [always]
+
+    - name: Normalize the provenance ledger
+      vars:
+        ledger_parsed: "{{ ledger_text | from_yaml if ledger_text | length > 0 else {} }}"
+        ledger_usable: "{{ ledger_parsed is mapping and (ledger_parsed.get('machines', none) is mapping) }}"
+      ansible.builtin.set_fact:
+        ledger: "{{ ledger_parsed if ledger_usable else {'format': 1, 'mode': config.mode, 'machines': {}} }}"
+        ledger_usable: "{{ ledger_usable | bool }}"
+      tags: [always]
+
+    - name: Warn when the ledger is unreadable
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: the ledger at {{ share_root_resolved }}/{{ ledger_file_name }}
+          is unreadable or corrupt. Stale-element cleanup is disabled for this
+          run: nothing playbook-managed will be removed. Fix or delete the
+          ledger file to re-enable cleanup.
+      when: not ledger_usable
+      tags: [always]
+
+    # ================================================================
+    # 4. Host-side bind mounts (bind mode)
+    # ================================================================
+    - name: Compute expected host bind targets
+      ansible.builtin.set_fact:
+        expected_host_targets: >-
+          {{ all_mounts | map(attribute='name')
+             | map('regex_replace', '^', share_root_resolved ~ '/') | list }}
+      tags: [always]
+
+    - name: Fail on ledger-stale host bind targets mounted with a foreign source
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.target }} (ledger-stale) is mounted with source
+          '{{ host_mounts[item.target].source }}'. Unmount it manually, then
+          re-run. This playbook never unmounts mounts it cannot prove it
+          created.
+      loop: >-
+        {{ ledger.machines | dict2items
+           | map(attribute='value.host_binds', default=[]) | flatten
+           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop_control:
+        label: "{{ item.target }}"
+      when:
+        - config.mode == 'bind'
+        - item.target in host_mounts
+      tags: [mounts]
+
+    - name: Unmount stale host binds (ledger-managed, no longer in config)
+      ansible.builtin.command: "umount {{ item.target | quote }}"
+      become: true
+      loop: >-
+        {{ ledger.machines | dict2items
+           | map(attribute='value.host_binds', default=[]) | flatten
+           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop_control:
+        label: "{{ item.target }}"
+      register: stale_host_umount
+      changed_when: stale_host_umount.rc == 0
+      when:
+        - config.mode == 'bind'
+        - item.target in host_mounts
+        - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Prune empty stale share subdirectories
+      ansible.builtin.command: "rmdir {{ (share_root_resolved ~ '/' ~ (item.target | basename)) | quote }}"
+      become: true
+      loop: >-
+        {{ ledger.machines | dict2items
+           | map(attribute='value.host_binds', default=[]) | flatten
+           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop_control:
+        label: "{{ item.target }}"
+      register: stale_prune
+      failed_when: false
+      changed_when: stale_prune.rc is defined and stale_prune.rc == 0
+      when:
+        - config.mode == 'bind'
+        - item.target not in host_mounts
+        - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Probe host bind identity (source vs share subdirectory)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import os, subprocess, sys
+            src, tgt = sys.argv[1], sys.argv[2]
+            p = subprocess.run(["findmnt", "-rn", "-o", "TARGET", "-M", tgt],
+                               capture_output=True, text=True)
+            mounted = p.returncode == 0 and p.stdout.strip() == tgt
+            try:
+                sa = os.stat(src); src_id = "%d:%d" % (sa.st_dev, sa.st_ino)
+            except OSError as e:
+                src_id = "STAT-ERROR: %s" % e
+            try:
+                sb = os.stat(tgt); tgt_id = "%d:%d" % (sb.st_dev, sb.st_ino)
+            except OSError as e:
+                tgt_id = "STAT-ERROR: %s" % e
+            print("DIAG: src=%r src_id=%s tgt=%r tgt_id=%s mounted=%s"
+                  % (src, src_id, tgt, tgt_id, mounted))
+            if not mounted:
+                print("NEEDS-MOUNT: %s is not a mountpoint" % tgt)
+                sys.exit(10)
+            if src_id != tgt_id:
+                print("FOREIGN: %s is a mountpoint bound from different content than %s" % (tgt, src), file=sys.stderr)
+                sys.exit(3)
+            print("OK: %s bound from %s" % (tgt, src))
+          - "{{ item.src }}"
+          - "{{ share_root_resolved ~ '/' ~ item.name }}"
+      loop: "{{ all_mounts }}"
+      loop_control:
+        extended: true
+        label: "{{ item.machine }}:{{ item.name }}"
+      register: host_bind_probe
+      changed_when: false
+      check_mode: false
+      failed_when: host_bind_probe.rc != 0 and host_bind_probe.rc != 10
+      when: config.mode == 'bind'
+      tags: [mounts, verify]
+    - name: Bind host source directories into the share
+      ansible.builtin.command: "mount --bind {{ item.src | quote }} {{ (share_root_resolved ~ '/' ~ item.name) | quote }}"
+      become: true
+      loop: "{{ all_mounts }}"
+      loop_control:
+        extended: true
+        label: "{{ item.machine }}:{{ item.name }}"
+      register: host_bind
+      changed_when: host_bind.rc == 0
+      when:
+        - config.mode == 'bind'
+        - host_bind_probe.results[ansible_loop.index0].rc | default(10) == 10
+        - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Remount readonly host binds
+      ansible.builtin.command: "mount -o remount,ro,bind {{ (share_root_resolved ~ '/' ~ item.name) | quote }}"
+      become: true
+      loop: "{{ all_mounts }}"
+      loop_control:
+        extended: true
+        label: "{{ item.machine }}:{{ item.name }}"
+      register: host_ro
+      changed_when: host_ro.rc == 0
+      when:
+        - config.mode == 'bind'
+        - item.readonly
+        - host_bind.results[ansible_loop.index0].changed | default(false)
+        - not ansible_check_mode
+      tags: [mounts]
+
+    # ================================================================
+    # 5. Machine start
+    # ================================================================
+    - name: Start machines that are stopped
+      ansible.builtin.command: "smolvm machine start --name {{ m.name }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: machine_start
+      changed_when: "'running (PID' in machine_start.stdout"
+      when:
+        - smolvm_sections[m.name].state != 'running'
+        - not ansible_check_mode
+      tags: [start]
+
+    - name: Compute machines started by this run
+      ansible.builtin.set_fact:
+        started_machines: >-
+          {{ machine_start.results | default([])
+             | selectattr('changed', 'defined') | selectattr('changed')
+             | map(attribute='m.name') | list }}
+      tags: [start]
+
+    - name: Wait for started machines to accept exec
+      ansible.builtin.command: "smolvm machine exec --name {{ item }} -- id -u"
+      loop: "{{ started_machines }}"
+      register: exec_probe
+      until: exec_probe.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+      tags: [start]
+
+    - name: Refresh the machine inventory after starting
+      ansible.builtin.command: smolvm machine ls --verbose
+      register: smolvm_ls
+      changed_when: false
+      check_mode: false
+      when: started_machines | length > 0
+      tags: [start]
+
+    - name: Re-parse the machine inventory after starting
+      ansible.builtin.set_fact:
+        smolvm_sections: "{{ smolvm_ls.stdout | smolvm_ls_sections }}"
+      when: started_machines | length > 0
+      tags: [start]
+
+    - name: Probe the effective exec uid on each running machine
+      ansible.builtin.command: "smolvm machine exec --name {{ m.name }} -- id -u"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: uid_probe
+      changed_when: false
+      check_mode: false
+      when: smolvm_sections[m.name].state == 'running'
+      tags: [start, mounts, install, verify]
+
+    - name: Record the exec uid per machine
+      ansible.builtin.set_fact:
+        exec_uids: >-
+          {%- set result = {} -%}
+          {%- for pr in uid_probe.results | default([]) -%}
+          {%- if pr['m'] is defined and pr['m']['name'] is defined -%}
+          {%- set _ = result.update({pr['m']['name']: pr['stdout'] | trim}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+      tags: [start, mounts, install, verify]
+
+    # ================================================================
+    # 6. Volume convergence (--tags attach; stopped machines only)
+    # ================================================================
+    - name: Compute the volume convergence plan per machine
+      ansible.builtin.set_fact:
+        volume_plans: >-
+          {%- set result = {} -%}
+          {%- for m in normalized -%}
+          {%- set observed = smolvm_sections[m.name].mounts -%}
+          {%- set observed_targets = observed | map(attribute='target') | list -%}
+          {%- set entry = (ledger.machines | default({})).get(m.name, {}) -%}
+          {%- if config.mode == 'bind' -%}
+          {%- set desired = [{'src': config.share_root, 'target': config.share_target, 'ro': false}] -%}
+          {%- else -%}
+          {%- set desired = [] -%}
+          {%- for mnt in all_mounts | selectattr('machine', 'eq', m.name) -%}
+          {%- set _ = desired.append({'src': mnt.src, 'target': mnt.target, 'ro': mnt.readonly}) -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {%- set desired_targets = desired | map(attribute='target') | list -%}
+          {%- set managed = [] -%}
+          {%- if entry.get('share_volume', false) -%}
+          {%- set _ = managed.append({'src': config.share_root, 'target': config.share_target}) -%}
+          {%- endif -%}
+          {%- for v in entry.get('volumes', []) -%}
+          {%- set _ = managed.append({'src': v.src, 'target': v.target}) -%}
+          {%- endfor -%}
+          {%- set stale_managed = managed | rejectattr('target', 'in', desired_targets) | list -%}
+          {%- set stale_targets = stale_managed | map(attribute='target') | list -%}
+          {%- set external = observed | rejectattr('target', 'in', desired_targets + stale_targets) | list -%}
+          {%- set adds = [] -%}
+          {%- for v in desired -%}
+          {%- if v.target not in observed_targets -%}
+          {%- set spec = '--volume=' ~ v.src ~ ':' ~ v.target ~ (':ro' if v.ro else '') -%}
+          {%- set _ = adds.append(spec) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- set removes = [] -%}
+          {%- for v in stale_managed -%}
+          {%- set _ = removes.append('--remove-volume=' ~ v.src ~ ':' ~ v.target) -%}
+          {%- endfor -%}
+          {%- set _ = result.update({m.name: {
+                'add': adds,
+                'remove': removes,
+                'external': external | length,
+                'desired_count': desired | length,
+              }}) -%}
+          {%- endfor -%}
+          {{ result }}
+      tags: [attach, never]
+
+    - name: Refuse volume changes on running machines
+      ansible.builtin.fail:
+        msg: >-
+          Machine '{{ m.name }}' is running; volume changes need a stopped
+          machine. Run: ansible-playbook bind-mounts.yml --tags stop -K, then
+          --tags attach, then --tags start.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when: smolvm_sections[m.name].state == 'running'
+      tags: [attach, never]
+
+    - name: Enforce the per-machine volume budget
+      ansible.builtin.assert:
+        that:
+          - volume_plans[m.name].desired_count + volume_plans[m.name].external <= m.max_volumes
+        msg: >-
+          Machine '{{ m.name }}': {{ volume_plans[m.name].desired_count }}
+          desired volume(s) + {{ volume_plans[m.name].external }} external
+          volume(s) exceed max_volumes={{ m.max_volumes }}. The smolvm volume
+          ceiling is a hard device budget
+          (https://github.com/smol-machines/smolvm/issues/941): remove mounts
+          from vars.yml, or set max_volumes explicitly only if you know the
+          machine has headroom.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      tags: [attach, never]
+
+    - name: Apply volume changes
+      ansible.builtin.command:
+        argv: "{{ ['smolvm', 'machine', 'update', '--name', m.name]
+                  + volume_plans[m.name].add + volume_plans[m.name].remove }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: volume_update
+      changed_when: volume_update.rc == 0
+      when:
+        - (volume_plans[m.name].add + volume_plans[m.name].remove) | length > 0
+        - not ansible_check_mode
+      tags: [attach, never]
+
+    # ================================================================
+    # 7. Install phase (bind mode): guest script, sudoers, profile hook
+    # ================================================================
+    - name: Fail when install is requested on a stopped machine
+      ansible.builtin.fail:
+        msg: >-
+          Machine '{{ m.name }}' is stopped; installing the bind-mount hook
+          needs a running machine. Run: ansible-playbook bind-mounts.yml
+          --tags start -K, then re-run.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[m.name].state != 'running'
+      tags: [install]
+
+    - name: Fail when the smolvm exec user is not root
+      ansible.builtin.fail:
+        msg: >-
+          Machine '{{ m.name }}' does not execute commands as root (uid
+          {{ exec_uids.get(m.name, 'unknown') }}). Managing the bind-mount hook
+          requires the smolvm exec user to be root: create or update the
+          machine without a non-root --user default.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when:
+        - config.mode == 'bind'
+        - exec_uids.get(m.name, '0') != '0'
+      tags: [install]
+
+    - name: Render the guest bind-mount script
+      ansible.builtin.template:
+        src: templates/bind-mount-on-guest.sh.j2
+        dest: "/tmp/bind-mount-on-guest-{{ m.name }}.sh"
+        mode: "0600"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when: config.mode == 'bind'
+      tags: [install]
+
+    - name: Copy the guest bind-mount script into each machine
+      ansible.builtin.command: "smolvm machine cp /tmp/bind-mount-on-guest-{{ m.name }}.sh {{ m.name }}:{{ installed_script_guest_path }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: script_copy
+      changed_when: script_copy.rc == 0
+      when:
+        - config.mode == 'bind'
+        - not ansible_check_mode
+      tags: [install]
+
+    - name: Set root ownership and permissions on the guest script
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - sh
+          - -c
+          - chown root:root "$1" && chmod 0755 "$1"
+          - sh
+          - "{{ installed_script_guest_path }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      changed_when: true
+      when:
+        - config.mode == 'bind'
+        - not ansible_check_mode
+      tags: [install]
+
+    - name: Copy the profile helper into each machine
+      ansible.builtin.command: "smolvm machine cp {{ playbook_dir }}/files/profile-manage.py {{ m.name }}:/tmp/profile-manage.py"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: helper_copy
+      changed_when: helper_copy.rc == 0
+      when:
+        - config.mode == 'bind'
+        - not ansible_check_mode
+      tags: [install]
+
+    - name: Apply the managed .bash_profile block
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - python3
+          - /tmp/profile-manage.py
+          - apply
+          - "{{ m.profile_path }}"
+          - "{{ m.uid | string }}"
+          - "{{ m.gid | string }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: profile_apply
+      changed_when: >-
+        'updated' in profile_apply.stdout or 'replaced' in profile_apply.stdout
+        or 'created' in profile_apply.stdout or 'appended' in profile_apply.stdout
+      when:
+        - config.mode == 'bind'
+        - not ansible_check_mode
+      tags: [install]
+
+    - name: Stage the sudoers drop-in on the host
+      ansible.builtin.copy:
+        content: |
+          # Managed by bind-mounts.yml (ansible). DO NOT EDIT; overwritten on re-run.
+          # Allows the primary guest user to trigger the bind-mount script.
+          {{ m.user }} ALL=(root) NOPASSWD: {{ installed_script_guest_path }}
+        dest: "/tmp/010-bind-mounts"
+        mode: "0600"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when: config.mode == 'bind'
+      tags: [install]
+
+    - name: Copy the sudoers drop-in into each machine
+      ansible.builtin.command: "smolvm machine cp /tmp/010-bind-mounts {{ m.name }}:/tmp/010-bind-mounts"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: sudoers_copy
+      changed_when: sudoers_copy.rc == 0
+      when:
+        - config.mode == 'bind'
+        - not ansible_check_mode
+      tags: [install]
+
+    - name: Validate the sudoers drop-in
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - visudo
+          - -cf
+          - /tmp/010-bind-mounts
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: sudoers_check
+      changed_when: false
+      when:
+        - config.mode == 'bind'
+        - not ansible_check_mode
+      tags: [install]
+
+    - name: Activate the sudoers drop-in
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - install
+          - -m
+          - "0440"
+          - -o
+          - root
+          - -g
+          - root
+          - /tmp/010-bind-mounts
+          - "{{ sudoers_dropin_guest_path }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: sudoers_install
+      changed_when: sudoers_install.rc == 0
+      when:
+        - config.mode == 'bind'
+        - not ansible_check_mode
+      tags: [install]
+
+    - name: Clean up host-side temp files
+      vars:
+        temp_paths: >-
+          {%- set paths = ['/tmp/010-bind-mounts'] -%}
+          {%- for m in normalized -%}
+          {%- set _ = paths.append('/tmp/bind-mount-on-guest-' ~ m.name ~ '.sh') -%}
+          {%- endfor -%}
+          {{ paths }}
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ temp_paths }}"
+      loop_control:
+        label: "{{ item }}"
+      when: config.mode == 'bind'
+      tags: [install]
+
+    - name: Clean up guest-side temp files
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - sh
+          - -c
+          - "[ -e /tmp/010-bind-mounts ] || [ -e /tmp/profile-manage.py ]; stale=$?; rm -f /tmp/010-bind-mounts /tmp/profile-manage.py; exit $stale"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: guest_temp_clean
+      changed_when: guest_temp_clean.rc == 0
+      failed_when: guest_temp_clean.rc not in [0, 1]
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [install]
+
+    # ================================================================
+    # 8. Guest bind mounts (bind mode)
+    # ================================================================
+    - name: Copy the mount helper into each running machine
+      ansible.builtin.command: "smolvm machine cp {{ playbook_dir }}/files/guest-mount-one.py {{ m.name }}:/tmp/guest-mount-one.py"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: mount_helper_copy
+      changed_when: mount_helper_copy.rc == 0
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Copy the verify helper into each running machine
+      ansible.builtin.command: "smolvm machine cp {{ playbook_dir }}/files/guest-verify-one.py {{ m.name }}:/tmp/guest-verify-one.py"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: verify_helper_copy
+      changed_when: verify_helper_copy.rc == 0
+      when:
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts, verify]
+
+    - name: Ensure and mount guest bind mounts
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ item.machine }}"
+          - --
+          - python3
+          - /tmp/guest-mount-one.py
+          - "{{ item.target }}"
+          - "{{ item.share_path }}"
+          - "{{ item.uid_eff | string }}"
+          - "{{ item.gid_eff | string }}"
+          - "{{ item.readonly | string | lower }}"
+      loop: "{{ all_mounts }}"
+      loop_control:
+        label: "{{ item.machine }}:{{ item.target }}"
+      register: guest_mount_result
+      changed_when: "'mounted:' in guest_mount_result.stdout"
+      failed_when: guest_mount_result.rc != 0
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[item.machine].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Fail with guidance when a machine is stopped but mounts were requested
+      ansible.builtin.fail:
+        msg: >-
+          Machine '{{ m.name }}' is stopped; guest bind mounts need a running
+          machine. Run: ansible-playbook bind-mounts.yml --tags start -K, then
+          re-run this playbook.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[m.name].state != 'running'
+      tags: [mounts]
+
+    - name: Unmount stale guest binds (ledger-managed, no longer in config)
+      vars:
+        current_targets: "{{ all_mounts | map(attribute='target') | list }}"
+        stale_pairs: >-
+          {%- set out = [] -%}
+          {%- for entry in (ledger.machines | default({})) | dict2items -%}
+          {%- for b in entry.value.get('guest_binds', []) -%}
+          {%- if b.target not in current_targets -%}
+          {%- set _ = out.append({'machine': entry.key, 'target': b.target}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ out | sort(attribute='target') | reverse }}
+      ansible.builtin.command:
+        argv: "{{ ['smolvm', 'machine', 'exec', '--name', pairs_item.machine, '--', 'umount', pairs_item.target] }}"
+      loop: "{{ stale_pairs }}"
+      loop_control:
+        loop_var: pairs_item
+        label: "{{ pairs_item.machine }}:{{ pairs_item.target }}"
+      register: stale_guest_umount
+      failed_when: false
+      changed_when: stale_guest_umount.rc is defined and stale_guest_umount.rc == 0
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[pairs_item.machine].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Note that bind mode is inactive (direct mode)
+      ansible.builtin.debug:
+        msg: >-
+          mode is 'direct': guest bind mounts and the login hook are not used.
+          Every mount is its own smolvm volume; run --tags attach to apply
+          changes to the volume set.
+      when: config.mode == 'direct'
+      tags: [mounts]
+
+    # ================================================================
+    # 9. Verify
+    # ================================================================
+    - name: Verify host bind identity
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import os, subprocess, sys
+            src, tgt = sys.argv[1], sys.argv[2]
+            p = subprocess.run(["findmnt", "-rn", "-o", "TARGET", "-M", tgt],
+                               capture_output=True, text=True)
+            if p.returncode != 0 or p.stdout.strip() != tgt:
+                print("verify FAIL (host): %s is not a mountpoint" % tgt, file=sys.stderr)
+                sys.exit(1)
+            sa, sb = os.stat(src), os.stat(tgt)
+            if (sa.st_dev, sa.st_ino) != (sb.st_dev, sb.st_ino):
+                print("verify FAIL (host): %s does not match %s (device:inode differ)" % (tgt, src), file=sys.stderr)
+                sys.exit(1)
+            print("verify ok (host): %s" % tgt)
+          - "{{ item.src }}"
+          - "{{ share_root_resolved ~ '/' ~ item.name }}"
+      loop: "{{ all_mounts }}"
+      loop_control:
+        label: "{{ item.machine }}:{{ item.name }}"
+      register: host_verify
+      changed_when: false
+      failed_when: host_verify.rc != 0
+      when: config.mode == 'bind'
+      tags: [verify]
+    - name: Verify guest binds
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ item.machine }}"
+          - --
+          - python3
+          - /tmp/guest-verify-one.py
+          - bind
+          - "{{ item.target }}"
+          - "{{ item.share_path }}"
+      loop: "{{ all_mounts }}"
+      loop_control:
+        label: "{{ item.machine }}:{{ item.target }}"
+      register: guest_verify_bind
+      changed_when: false
+      failed_when: guest_verify_bind.rc != 0
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[item.machine].state == 'running'
+      tags: [verify]
+
+    - name: Verify direct-mode guest volumes
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ item.machine }}"
+          - --
+          - python3
+          - /tmp/guest-verify-one.py
+          - direct
+          - "{{ item.target }}"
+      loop: "{{ all_mounts }}"
+      loop_control:
+        label: "{{ item.machine }}:{{ item.target }}"
+      register: direct_verify
+      changed_when: false
+      failed_when: direct_verify.rc != 0
+      when:
+        - config.mode == 'direct'
+        - smolvm_sections[item.machine].state == 'running'
+      tags: [verify]
+
+    - name: Note skipped guest verification for stopped machines
+      ansible.builtin.debug:
+        msg: "verify skipped: machine {{ m.name }} is stopped"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when: smolvm_sections[m.name].state != 'running'
+      tags: [verify]
+
+    # ================================================================
+    # 10. Ledger write
+    # ================================================================
+    - name: Build the new provenance ledger
+      ansible.builtin.set_fact:
+        ledger_new: >-
+          {%- set machines_out = {} -%}
+          {%- for m in normalized -%}
+          {%- set mounts = all_mounts | selectattr('machine', 'eq', m.name) | list -%}
+          {%- set host_binds = [] -%}
+          {%- set guest_binds = [] -%}
+          {%- set volumes = [] -%}
+          {%- for mnt in mounts -%}
+          {%- set _ = host_binds.append({'target': share_root_resolved ~ '/' ~ mnt.name, 'source': mnt.src}) -%}
+          {%- set _ = guest_binds.append({'target': mnt.target, 'source': mnt.share_path}) -%}
+          {%- set _ = volumes.append({'src': mnt.src, 'target': mnt.target, 'readonly': mnt.readonly}) -%}
+          {%- endfor -%}
+          {%- set _ = machines_out.update({m.name: {
+                'share_volume': config.mode == 'bind',
+                'volumes': volumes if config.mode == 'direct' else [],
+                'guest_binds': guest_binds if config.mode == 'bind' else [],
+                'host_binds': host_binds if config.mode == 'bind' else [],
+                'installed': {
+                  'script': config.mode == 'bind',
+                  'sudoers': config.mode == 'bind',
+                  'bash_profile_block': config.mode == 'bind',
+                },
+              }}) -%}
+          {%- endfor -%}
+          {{ {'format': 1, 'mode': config.mode, 'machines': machines_out} }}
+      tags: [always]
+
+    - name: Write the provenance ledger
+      ansible.builtin.copy:
+        content: |
+          # Managed by bind-mounts.yml (ansible). DO NOT EDIT; overwritten on re-run.
+          #
+          {{ ledger_new | to_nice_yaml(indent=2) }}
+        dest: "{{ share_root_resolved }}/{{ ledger_file_name }}"
+        mode: "0644"
+      become: true
+      when: not ansible_check_mode
+      tags: [always]
+
+    # ================================================================
+    # 11. Stop (--tags stop)
+    # ================================================================
+    - name: Sync guest filesystems before stopping
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - sync
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [stop, never]
+
+    - name: Stop running machines
+      ansible.builtin.command: "smolvm machine stop --name {{ m.name }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: machine_stop
+      changed_when: "'Stopped machine' in machine_stop.stdout"
+      when:
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [stop, never]
+
+    # ================================================================
+    # 12. Teardown (--tags teardown)
+    # ================================================================
+    - name: Refuse direct-mode volume removal on running machines
+      ansible.builtin.fail:
+        msg: >-
+          Machine '{{ m.name }}' is running; removing its volumes requires a
+          stopped machine. Run: ansible-playbook bind-mounts.yml --tags stop
+          -K, then --tags teardown.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when:
+        - config.mode == 'direct'
+        - smolvm_sections[m.name].state == 'running'
+      tags: [teardown, never]
+
+    - name: Copy the profile helper for teardown
+      ansible.builtin.command: "smolvm machine cp {{ playbook_dir }}/files/profile-manage.py {{ m.name }}:/tmp/profile-manage.py"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: teardown_helper_copy
+      changed_when: teardown_helper_copy.rc == 0
+      when:
+        - config.mode == 'bind'
+        - (ledger.machines | default({})).get(m.name, {}).get('installed', {}).get('bash_profile_block', false)
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Unmount current guest binds (teardown, deep first)
+      vars:
+        teardown_pairs: >-
+          {{ all_mounts | map(attribute='machine') | zip(all_mounts | map(attribute='target'))
+             | sort(attribute='1') | reverse }}
+      ansible.builtin.command:
+        argv: "{{ ['smolvm', 'machine', 'exec', '--name', teardown_item[0], '--', 'umount', teardown_item[1]] }}"
+      loop: "{{ teardown_pairs }}"
+      loop_control:
+        loop_var: teardown_item
+        label: "{{ teardown_item[0] }}:{{ teardown_item[1] }}"
+      register: teardown_guest_umount
+      failed_when: false
+      changed_when: teardown_guest_umount.rc is defined and teardown_guest_umount.rc == 0
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[teardown_item[0]].state == 'running'
+        - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Unmount host binds (teardown)
+      ansible.builtin.command: "umount {{ (share_root_resolved ~ '/' ~ item.name) | quote }}"
+      become: true
+      loop: "{{ all_mounts }}"
+      loop_control:
+        label: "{{ item.machine }}:{{ item.name }}"
+      register: teardown_host_umount
+      changed_when: teardown_host_umount.rc is defined and teardown_host_umount.rc == 0
+      when:
+        - config.mode == 'bind'
+        - host_mounts.get(share_root_resolved ~ '/' ~ item.name, none) is not none
+        - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Prune emptied share subdirectories (teardown)
+      ansible.builtin.command: "rmdir {{ (share_root_resolved ~ '/' ~ item.name) | quote }}"
+      become: true
+      loop: "{{ all_mounts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: teardown_prune
+      failed_when: false
+      changed_when: teardown_prune.rc is defined and teardown_prune.rc == 0
+      when:
+        - config.mode == 'bind'
+        - host_mounts.get(share_root_resolved ~ '/' ~ item.name, none) is none
+        - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Compute managed volume removals (teardown)
+      ansible.builtin.set_fact:
+        teardown_removals: >-
+          {%- set result = {} -%}
+          {%- for m in normalized -%}
+          {%- set entry = (ledger.machines | default({})).get(m.name, {}) -%}
+          {%- set removals = [] -%}
+          {%- if entry.get('share_volume', false) -%}
+          {%- set _ = removals.append('--remove-volume=' ~ config.share_root ~ ':' ~ config.share_target) -%}
+          {%- endif -%}
+          {%- for v in entry.get('volumes', []) -%}
+          {%- set _ = removals.append('--remove-volume=' ~ v.src ~ ':' ~ v.target) -%}
+          {%- endfor -%}
+          {%- set _ = result.update({m.name: removals}) -%}
+          {%- endfor -%}
+          {{ result }}
+      tags: [teardown, never]
+
+    - name: Remove managed volumes (teardown)
+      ansible.builtin.command:
+        argv: "{{ ['smolvm', 'machine', 'update', '--name', m.name] + teardown_removals[m.name] }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: teardown_volume_update
+      changed_when: teardown_volume_update.rc == 0
+      when:
+        - teardown_removals[m.name] | length > 0
+        - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Remove the installed guest script (teardown)
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - rm
+          - -f
+          - "{{ installed_script_guest_path }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: teardown_script_rm
+      changed_when: teardown_script_rm.rc == 0
+      when:
+        - (ledger.machines | default({})).get(m.name, {}).get('installed', {}).get('script', false)
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Remove the sudoers drop-in (teardown)
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - rm
+          - -f
+          - "{{ sudoers_dropin_guest_path }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: teardown_sudoers_rm
+      changed_when: teardown_sudoers_rm.rc == 0
+      when:
+        - (ledger.machines | default({})).get(m.name, {}).get('installed', {}).get('sudoers', false)
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Remove the managed .bash_profile block (teardown)
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - python3
+          - /tmp/profile-manage.py
+          - remove
+          - "{{ m.profile_path }}"
+          - "{{ m.uid | string }}"
+          - "{{ m.gid | string }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: teardown_profile_rm
+      changed_when: >-
+        teardown_profile_rm.rc is defined and teardown_profile_rm.rc == 0
+        and 'removed managed block' in teardown_profile_rm.stdout
+      when:
+        - (ledger.machines | default({})).get(m.name, {}).get('installed', {}).get('bash_profile_block', false)
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [teardown, never]

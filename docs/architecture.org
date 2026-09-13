@@ -1,0 +1,147 @@
+* bind-mounts architecture
+** Components
+*** The configuration
+vars.yml on the host is the single source of truth: machines, users, mounts,
+mode, and the volume ceiling. It is untracked; the checked-in example is
+vars.yml.example.
+*** The playbook
+bind-mounts.yml validates the configuration, gathers real state from findmnt
+and smolvm machine ls, plans a diff, applies it, verifies the result, and
+rewrites the ledger.
+*** The filter plugin
+filter_plugins/smolvm_facts.py parses smolvm machine ls --verbose into
+per-machine state and volume lists. The format was verified against real
+output in both running and stopped states.
+*** The share root and the ledger
+share_root holds one subdirectory per mount; each is bind-mounted from its
+source on the host. The ledger file .bind-mounts-state.yml records everything
+the playbook created.
+*** Guest-side artifacts
+Three per machine: the root-owned script at
+/usr/local/sbin/bind-mount-on-guest.sh, the sudoers drop-in under
+/etc/sudoers.d, and the managed block in the primary user profile, which uses
+the standard blockinfile markers.
+*** The smolvm volumes
+Bind mode attaches share_root as one volume per machine. Direct mode attaches
+one volume per configured mount and removes the share volume.
+** Bind-mode data flow
+#+BEGIN_SRC text
+vars.yml ──▶ bind-mounts.yml ──▶ mount --bind <src> <share_root>/<name>
+                                 (host, as root)
+        │
+        ▼  smolvm volume: one virtiofs device, one IRQ slot
+        guest <share_target>/<name>
+        │
+        ▼  mount --bind (guest, as root)
+        guest <target>
+        verified: target device:inode == <share_target>/<name> device:inode
+
+login fallback: .bash_profile ─▶ sudo -n /usr/local/sbin/bind-mount-on-guest.sh
+#+END_SRC
+** Direct-mode data flow
+#+BEGIN_SRC text
+vars.yml ──▶ bind-mounts.yml ──▶ smolvm machine update --volume <src>:<target>[:ro]
+        │  machine stopped: add missing, remove ledger-stale, keep foreign
+        ▼
+        guest <target>
+        verified: virtiofs mount present
+#+END_SRC
+** Modes
+*** Bind mode
+One volume slot per machine regardless of mount count. Guests see bind mounts
+from the share, and the login hook re-applies them at login. The volume is
+attached once with the attach tag while the machine is stopped.
+*** Direct mode
+One volume per configured mount, managed by machine update, with no
+guest-side artifacts and nothing to run at login. Subject to the volume
+ceiling.
+*** Switching between modes
+Stop the machines, change mode in the configuration, run the attach tag, then
+start the machines and run the default playbook. The attach step converges
+the volume set in both directions and removes bind-mode artifacts when
+switching to direct.
+** smolvm constraints
+*** The volume ceiling is a libkrun device budget
+x86_64 exposes 11 virtio-mmio IRQs, one per virtio device. Balloon, rng,
+console, and two block devices are fixed; the root filesystem, each volume,
+and the vsock agent channel share the remainder, so a directly created
+machine fits 4 host volumes, a packed one fits 3, and every extra device,
+such as virtio-net for published ports, costs another slot. Crossing the
+budget fails the boot with an opaque krun_start_enter -22. See issue #941 in
+the smolvm tracker.
+*** Volumes are directories only, never single files
+*** Volume changes need a stopped machine
+machine update writes the configuration for the next start and refuses to
+run against a running machine, so the attach tag refuses running machines
+instead of stopping them.
+*** Exec runs as the configured user
+smolvm machine exec executes as the machine's configured user, root by
+default. The playbook relies on this for guest management and refuses the
+install phase when the exec user is not root.
+** Provenance ledger
+*** Format
+#+BEGIN_SRC yaml
+format: 1
+mode: bind
+machines:
+  my-vm:
+    share_volume: true
+    volumes: []
+    host_binds:
+      - target: /home/you/share/website
+        source: /home/you/projects/website
+    guest_binds:
+      - target: /home/you/projects/website
+        source: /mnt/share/website
+    installed:
+      script: true
+      sudoers: true
+      bash_profile_block: true
+#+END_SRC
+*** First-run adoption verifies and records matching mounts
+*** Stale entries are unmounted, pruned, and removed from the volume set
+Guest binds are unmounted deep first, host binds are unmounted, empty
+subdirectories are pruned, and volumes are removed with machine update.
+*** Foreign state is never touched
+Anything not in the ledger is left alone. A foreign mount sitting at a
+wanted target fails the run with instructions.
+*** An unreadable ledger disables cleanup for that run
+Nothing managed is removed until the ledger is fixed or deleted.
+** Security model
+The login hook must run as root inside the guest. A NOPASSWD sudoers rule
+that points at a script inside the shared volume is equivalent to full root,
+because the guest user can rewrite that script. This design closes the hole:
+the playbook renders the script from the configuration, copies it to a
+root-owned 0755 path, and scopes the sudoers rule to exactly that path.
+
+#+BEGIN_SRC
+<user> ALL=(root) NOPASSWD: /usr/local/sbin/bind-mount-on-guest.sh
+#+END_SRC
+
+The rule is validated with visudo before activation, and the profile hook
+invokes the script with sudo -n so a missing rule fails fast instead of
+prompting. Guest management itself uses smolvm machine exec, which runs as
+the machine's configured user, so no host-side passwordless sudo is involved;
+host-side bind mounts use Ansible become with password sudo.
+** Failure and corner cases
+*** Foreign mount at a wanted target fails without unmounting anything
+*** Stale binds are unmounted, pruned, and never force-deleted
+Guest binds are unmounted deep first; host bind targets are unmounted and
+removed only when empty.
+*** Wrong source at a target is caught by device:inode comparison
+Both the host and guest identity checks compare the target's device and
+inode against the configured source, so a stale or wrong-source mount is
+never silently skipped. Source-path comparison is deliberately avoided
+because the kernel reports bind sources in normalized form that cannot be
+matched by string equality.
+*** Nested guest targets mount shallow first and unmount deep first
+*** An unreadable ledger disables cleanup for that run
+*** Stopped versus running machines gate different phases
+Guest mount collection and guest binds require running machines; volume
+changes require stopped machines; both refuse with instructions rather than
+guessing.
+*** Non-root exec user fails the install phase
+*** Exceeded volume budget fails with counts and the issue link
+*** Missing or non-directory sources fail before any mutation
+*** Corrupt sudoers content is rejected before activation
+*** Check mode skips every mutating task

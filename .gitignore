@@ -2,3 +2,6 @@
 .omp/
 reference/
 tmp/
+vars.yml
+*~undo-tree~
+__pycache__/
