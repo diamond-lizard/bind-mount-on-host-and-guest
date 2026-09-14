@@ -66,32 +66,34 @@ every login as a fallback.
 ** How to
 *** Add a volume
 Add a mount entry under the machine in vars.yml and run the default
-playbook. In bind mode the new directory rides inside the existing share
-volume: the run creates the share subdirectory, bind-mounts it on the host,
-creates the target directory in the guest, and binds it from the share,
-all while the machine is running. In direct mode the new mount becomes a
-new volume: a stopped machine is converged during the run, and a running
-machine halts the run with an ACTION REQUIRED message; stop it and re-run.
+playbook. Bind mode: the guest can stay running — the new directory rides
+inside the existing share volume, so the run creates the share
+subdirectory, bind-mounts it on the host, creates the target directory in
+the guest, and binds it from the share. Direct mode: the guest must be
+stopped — the new mount becomes a new volume, and volume changes require a
+stopped machine. A stopped machine is converged during the run; a running
+machine halts the run with an ACTION REQUIRED message, so stop it and
+re-run.
 *** Remove a volume
-Delete the mount entry from vars.yml and run the default playbook. The run
-unmounts everything the ledger proves it created: the host-side bind and
-the emptied share subdirectory in bind mode, the guest-side bind, and, in
-direct mode, the volume itself. Guest target directories are never removed
-and no data is deleted. In bind mode this happens while the machine runs;
-in direct mode the volume removal requires a stopped machine, exactly as
-adding does.
+Delete the mount entry from vars.yml and run the default playbook. Bind
+mode: the guest can stay running — the run unmounts everything the ledger
+proves it created: the host-side bind, the emptied share subdirectory, and
+the guest-side bind. Direct mode: the guest must be stopped, because the
+volume itself is removed. Guest target directories are never removed and
+no data is deleted in either mode.
 *** Change a volume
-Changing the target path or the share name converges automatically: the
-old binds are unmounted as ledger-stale and the new ones are created. In
-bind mode this runs against a live machine; in direct mode the volume
-re-creation requires a stopped machine.
+Changing the target path or the share name converges automatically. Bind
+mode: the guest can stay running — the old binds are unmounted as
+ledger-stale and the new ones are created. Direct mode: the guest must be
+stopped, because the volume re-creation is a volume change.
 
-Two changes need manual preparation. Changing the source directory of an
-existing mount fails the identity check with a foreign-mount message;
-unmount the old host bind first, manually or with --tags teardown, then
-edit and re-run. Flipping readonly on an already-mounted pair is not
-applied automatically; unmount it first, or recreate the volume in direct
-mode.
+Two changes need manual preparation, because the playbook refuses to
+repurpose an existing mount: changing the source directory of an existing
+mount fails the identity check with a foreign-mount message, and flipping
+readonly on an already-mounted pair is not applied automatically. In both
+cases unmount the old bind pair first — the host bind, and the guest bind
+through smolvm machine exec — or simply stop the guest, which clears its
+binds; then edit and re-run.
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and
