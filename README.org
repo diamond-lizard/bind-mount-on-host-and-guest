@@ -240,6 +240,45 @@ checkpoint its journal, and only then is the VMM terminated, after which the
 host fsyncs the disk files. Guest processes get no chance to clean up; it is
 sync-then-kill, like pulling power after sync, so save editor buffers first.
 The stop tag adds a redundant guest sync before stopping as belt-and-braces.
+** Glossary
+
+- *bind mode*: one share volume per machine; each configured directory is
+  bind-mounted into the share root on the host and from the share to its
+  target path inside the guest.
+- *direct mode*: each configured directory is attached as its own smolvm
+  volume, with no share volume and no guest-side artifacts.
+- *device:inode identity*: the pair of device and inode numbers reported by
+  stat. Equal identity means two paths reference the same content; this is
+  how bind mounts are verified, because bind sources cannot be compared as
+  strings — the kernel reports them in normalized form.
+- *exec user*: the user as whom smolvm machine exec runs commands inside a
+  guest. Management operations require it to be root.
+- *foreign state*: any mount, volume, or file the ledger cannot prove the
+  playbook created. Refused or ignored, never removed.
+- *guest bind*: a bind mount inside the guest, from the share path to the
+  target path.
+- *host bind*: a bind mount on the host, from a configured source directory
+  to its share subdirectory.
+- *ledger*: the file .bind-mounts-state.yml inside the share root. It
+  records everything the playbook created, is written at the end of a
+  successful run, and is read at the start of the next; it is the basis of
+  provenance and stale-element cleanup.
+- *login hook*: the managed block in the machine user's .bash_profile that
+  re-applies the guest binds at every login through passwordless sudo.
+- *mount entry*: one configured host directory plus its guest target path
+  in vars.yml; the unit of sharing.
+- *share path*: the guest-side location of a mount entry inside the share:
+  share_target followed by the mount name.
+- *share root*: the host directory that holds one subdirectory per mount
+  entry; attached to each machine as one volume in bind mode.
+- *share target*: the path inside the guest at which the share root is
+  mounted.
+- *share volume*: the single smolvm volume backed by the share root; bind
+  mode only.
+- *stale element*: something the ledger proves the playbook created that
+  the current configuration no longer lists; removed during convergence.
+- *volume*: a host directory attached to a machine as its own virtiofs
+  device; each volume consumes one of the few device slots smolvm offers.
 ** Troubleshooting
 *** A missing vars.yml fails fast with copy instructions
 *** A target mounted with a different source needs manual resolution
