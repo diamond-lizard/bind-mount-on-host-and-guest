@@ -255,4 +255,16 @@ machine has headroom; see smolvm issue [[https://github.com/smol-machines/smolvm
 *** An unreadable ledger disables cleanup for that run
 Fix or delete the ledger file; deleting it loses only the cleanup
 bookkeeping.
-*** Guest management needs the root exec user
+*** The smolvm exec user must be root for the playbook to manage a guest
+**** Context
+The playbook reaches a guest only through smolvm machine exec, which runs
+as the exec user configured on the machine. Installing the login hook
+writes root-owned files — the script under /usr/local/sbin and the
+sudoers drop-in — and the guest-side mounts need root.
+**** Cause
+The machine's configured exec user is not root — typically because it was
+created with a non-root --user default — so the playbook fails the run
+with the machine's uid in the message.
+**** Solution
+Create or update the machine without a non-root --user default, then
+re-run the playbook.
