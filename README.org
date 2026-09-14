@@ -202,8 +202,10 @@ The stop tag adds a redundant guest sync before stopping as belt-and-braces.
 *** A target mounted with a different source needs manual resolution
 Unmount the foreign mount, or run the teardown tag for ledger-managed binds,
 then re-run the playbook.
-*** Refused volume changes mean stop, then attach, then start
-The playbook never stops a machine with live sessions on its own.
+*** Refused volume changes mean stop, then re-run
+The playbook never stops a machine with live sessions on its own. Re-run
+after stopping: the run attaches the volume, starts the machine, and
+finishes the rest.
 *** An exceeded volume budget counts hand-attached volumes too
 Remove mounts from vars.yml, or raise max_volumes only if you know the
 machine has headroom; see issue #941.
