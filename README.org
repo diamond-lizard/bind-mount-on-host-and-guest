@@ -251,7 +251,8 @@ after stopping: the run attaches the volume, starts the machine, and
 finishes the rest.
 *** An exceeded volume budget counts hand-attached volumes too
 Remove mounts from vars.yml, or raise max_volumes only if you know the
-machine has headroom; see issue #941.
+machine has headroom; see
+[[https://github.com/smol-machines/smolvm/issues/941][issue #941]].
 *** An unreadable ledger disables cleanup for that run
 Fix or delete the ledger file; deleting it loses only the cleanup
 bookkeeping.
