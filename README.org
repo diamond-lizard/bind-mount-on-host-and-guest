@@ -241,7 +241,6 @@ host fsyncs the disk files. Guest processes get no chance to clean up; it is
 sync-then-kill, like pulling power after sync, so save editor buffers first.
 The stop tag adds a redundant guest sync before stopping as belt-and-braces.
 ** Glossary
-
 - *bind mode*: one share volume per machine; each configured directory is
   bind-mounted into the share root on the host and from the share to its
   target path inside the guest.
