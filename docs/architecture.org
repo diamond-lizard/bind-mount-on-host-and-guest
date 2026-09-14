@@ -6,8 +6,9 @@ mode, and the volume ceiling. It is untracked; the checked-in example is
 vars.yml.example.
 *** The playbook
 bind-mounts.yml validates the configuration, gathers real state from findmnt
-and smolvm machine ls, plans a diff, applies it, verifies the result, and
-rewrites the ledger.
+and smolvm machine ls, plans a volume diff, converges stopped machines,
+halts before any mutation when a running machine needs volume changes,
+applies the rest, verifies the result, and rewrites the ledger.
 *** The filter plugin
 filter_plugins/smolvm_facts.py parses smolvm machine ls --verbose into
 per-machine state and volume lists. The format was verified against real
@@ -41,7 +42,8 @@ login fallback: .bash_profile ─▶ sudo -n /usr/local/sbin/bind-mount-on-guest
 ** Direct-mode data flow
 #+BEGIN_SRC text
 vars.yml ──▶ bind-mounts.yml ──▶ smolvm machine update --volume <src>:<target>[:ro]
-        │  machine stopped: add missing, remove ledger-stale, keep foreign
+        │  machine stopped: converged by the default run or --tags attach:
+        │    add missing, remove ledger-stale, keep foreign
         ▼
         guest <target>
         verified: virtiofs mount present
@@ -70,13 +72,14 @@ console, and two block devices are fixed; the root filesystem, each volume,
 and the vsock agent channel share the remainder, so a directly created
 machine fits 4 host volumes, a packed one fits 3, and every extra device,
 such as virtio-net for published ports, costs another slot. Crossing the
-budget fails the boot with an opaque krun_start_enter -22. See issue #941 in
-the smolvm tracker.
+budget fails the boot with an opaque krun_start_enter -22. See smolvm issue
+[[https://github.com/smol-machines/smolvm/issues/941][#941]].
 *** Volumes are directories only, never single files
 *** Volume changes need a stopped machine
 machine update writes the configuration for the next start and refuses to
-run against a running machine, so the attach tag refuses running machines
-instead of stopping them.
+run against a running machine. The default run converges stopped machines
+by itself and halts with guidance when a running machine needs volume
+changes; the attach tag refuses running machines instead of stopping them.
 *** Exec runs as the configured user
 smolvm machine exec executes as the machine's configured user, root by
 default. The playbook relies on this for guest management and refuses the
@@ -140,9 +143,10 @@ matched by string equality.
 *** Nested guest targets mount shallow first and unmount deep first
 *** An unreadable ledger disables cleanup for that run
 *** Stopped versus running machines gate different phases
-Guest mount collection and guest binds require running machines; volume
-changes require stopped machines; both refuse with instructions rather than
-guessing.
+Guest mount collection and guest binds require running machines. Volume
+changes require stopped machines: the default run converges stopped
+machines by itself and halts with an ACTION REQUIRED message when a
+running machine needs volume changes; the attach tag refuses them.
 *** Non-root exec user fails the install phase
 *** Exceeded volume budget fails with counts and the issue link
 *** Missing or non-directory sources fail before any mutation
