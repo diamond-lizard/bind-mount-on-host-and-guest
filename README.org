@@ -20,7 +20,7 @@ each entry from the share to its real target path, so one volume slot serves
 any number of directories. In direct mode every configured directory becomes
 its own smolvm volume, which is simpler inside the guest but uses one volume
 slot per directory. Switching modes is a one-line configuration change:
-stop the machines, change the mode, and run the playbook once — it converges
+stop the machines, change the mode, and run the playbook once; it converges
 the volume set, restarts the machines, and verifies the result.
 
 The mode choice exists because of a smolvm constraint: a directory attached
@@ -71,7 +71,7 @@ playbook. Whether the guest can stay running depends on the mode.
 **** Bind mode: the guest can stay running
 The new directory rides inside the existing share volume, so the run
 creates the share subdirectory, bind-mounts it on the host, creates the
-target directory in the guest, and binds it from the share — all while
+target directory in the guest, and binds it from the share, all while
 the machine runs.
 **** Direct mode: the guest must be stopped
 The new mount becomes a new volume, and volume changes require a stopped
@@ -95,7 +95,7 @@ The playbook refuses to repurpose an existing mount. Changing the source
 directory of an existing mount fails the identity check with a
 foreign-mount message, and flipping readonly on an already-mounted pair
 is not applied automatically. In both cases, unmount the old bind pair
-first — the host bind, and the guest bind through smolvm machine exec —
+first (the host bind, and the guest bind through smolvm machine exec),
 or simply stop the guest, which clears its binds; then edit and re-run.
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
@@ -242,7 +242,7 @@ share volume and no guest-side artifacts.
 *** Device:inode identity
 The pair of device and inode numbers reported by stat. Equal identity
 means two paths reference the same content; this is how bind mounts are
-verified, because bind sources cannot be compared as strings — the
+verified, because bind sources cannot be compared as strings; the
 kernel reports them in normalized form.
 *** Exec user
 The user as whom smolvm machine exec runs commands inside a guest.
@@ -287,11 +287,11 @@ bookkeeping.
 **** Context
 The playbook reaches a guest only through smolvm machine exec, which runs
 as the exec user configured on the machine. Installing the login hook
-writes root-owned files — the script under /usr/local/sbin and the
-sudoers drop-in — and the guest-side mounts need root.
+writes root-owned files (the script under /usr/local/sbin and the
+sudoers drop-in), and the guest-side mounts need root.
 **** Cause
-The machine's configured exec user is not root — typically because it was
-created with a non-root --user default — so the playbook fails the run
+The machine's configured exec user is not root, typically because it was
+created with a non-root --user default; the playbook fails the run
 with the machine's uid in the message.
 **** Solution
 Create or update the machine without a non-root --user default, then
