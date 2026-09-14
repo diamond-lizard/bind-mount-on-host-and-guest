@@ -34,7 +34,7 @@ as published ports. The ceiling lives in libkrun, and smolvm has no preflight
 for it; see [[https://github.com/smol-machines/smolvm/issues/941][issue #941]].
 bind mode makes the ceiling irrelevant to the number of shared directories;
 direct mode is subject to it.
-** 1 Quick start
+** Quick start
 *** 1 Copy vars.yml.example to vars.yml in the repository root
 The playbook looks for vars.yml in its own directory, next to
 bind-mounts.yml; put it exactly there.
@@ -63,25 +63,6 @@ command to run; stop it and re-run.
 Log in as usual with smolvm machine exec. The mounts are already in place,
 and the installed .bash_profile hook re-applies them non-interactively at
 every login as a fallback.
-** 2 Volume attachment
-In bind mode every machine carries the share volume; in direct mode every
-configured mount is its own volume. The default run keeps this true by
-itself: a stopped machine whose volume set is missing or stale gets
-converged during the run, and a running machine that needs volume changes
-halts the run with a boxed ACTION REQUIRED message naming the machine and
-the command to run; stop it and re-run the playbook to converge.
-
-For explicit control, the attach tag converges the volume set on stopped
-machines and refuses running ones:
-
-#+BEGIN_SRC
-smolvm machine stop --name my-vm
-ansible-playbook bind-mounts.yml -i inventory --tags attach
-smolvm machine start --name my-vm
-#+END_SRC
-
-attach never stops anything on its own, and machines whose volume set
-already matches the configuration are left untouched by both paths.
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and
@@ -142,6 +123,8 @@ running machines and a root exec user.
 *** start starts stopped machines and waits for exec readiness
 *** verify checks every mount read-only after the run
 *** attach converges the volume set; machines must be stopped
+The default run already converges stopped machines automatically, so attach
+is only needed for explicit, step-by-step control.
 *** stop syncs each guest and stops the machines
 Tolerates machines that are already stopped.
 *** teardown undoes everything the playbook created
