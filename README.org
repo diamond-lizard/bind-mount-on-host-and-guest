@@ -63,6 +63,35 @@ command to run; stop it and re-run.
 Log in as usual with smolvm machine exec. The mounts are already in place,
 and the installed .bash_profile hook re-applies them non-interactively at
 every login as a fallback.
+** How to
+*** Add a volume
+Add a mount entry under the machine in vars.yml and run the default
+playbook. In bind mode the new directory rides inside the existing share
+volume: the run creates the share subdirectory, bind-mounts it on the host,
+creates the target directory in the guest, and binds it from the share,
+all while the machine is running. In direct mode the new mount becomes a
+new volume: a stopped machine is converged during the run, and a running
+machine halts the run with an ACTION REQUIRED message; stop it and re-run.
+*** Remove a volume
+Delete the mount entry from vars.yml and run the default playbook. The run
+unmounts everything the ledger proves it created: the host-side bind and
+the emptied share subdirectory in bind mode, the guest-side bind, and, in
+direct mode, the volume itself. Guest target directories are never removed
+and no data is deleted. In bind mode this happens while the machine runs;
+in direct mode the volume removal requires a stopped machine, exactly as
+adding does.
+*** Change a volume
+Changing the target path or the share name converges automatically: the
+old binds are unmounted as ledger-stale and the new ones are created. In
+bind mode this runs against a live machine; in direct mode the volume
+re-creation requires a stopped machine.
+
+Two changes need manual preparation. Changing the source directory of an
+existing mount fails the identity check with a foreign-mount message;
+unmount the old host bind first, manually or with --tags teardown, then
+edit and re-run. Flipping readonly on an already-mounted pair is not
+applied automatically; unmount it first, or recreate the volume in direct
+mode.
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and
@@ -154,35 +183,6 @@ untouched but still count against max_volumes.
 
 For step-by-step control you can still converge explicitly with --tags
 attach after stopping, and start the machines with --tags start.
-** How to
-*** Add a volume
-Add a mount entry under the machine in vars.yml and run the default
-playbook. In bind mode the new directory rides inside the existing share
-volume: the run creates the share subdirectory, bind-mounts it on the host,
-creates the target directory in the guest, and binds it from the share,
-all while the machine is running. In direct mode the new mount becomes a
-new volume: a stopped machine is converged during the run, and a running
-machine halts the run with an ACTION REQUIRED message; stop it and re-run.
-*** Remove a volume
-Delete the mount entry from vars.yml and run the default playbook. The run
-unmounts everything the ledger proves it created: the host-side bind and
-the emptied share subdirectory in bind mode, the guest-side bind, and, in
-direct mode, the volume itself. Guest target directories are never removed
-and no data is deleted. In bind mode this happens while the machine runs;
-in direct mode the volume removal requires a stopped machine, exactly as
-adding does.
-*** Change a volume
-Changing the target path or the share name converges automatically: the
-old binds are unmounted as ledger-stale and the new ones are created. In
-bind mode this runs against a live machine; in direct mode the volume
-re-creation requires a stopped machine.
-
-Two changes need manual preparation. Changing the source directory of an
-existing mount fails the identity check with a foreign-mount message;
-unmount the old host bind first, manually or with --tags teardown, then
-edit and re-run. Flipping readonly on an already-mounted pair is not
-applied automatically; unmount it first, or recreate the volume in direct
-mode.
 ** Safety model
 *** The provenance ledger records everything the playbook creates
 The ledger lives beside the share subdirectories and records volumes, host
