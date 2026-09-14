@@ -31,7 +31,8 @@ mounts, and the vsock agent channel share the rest, so a directly created
 machine fits at most 4 host volumes (3 for machines created from a packed
 .smolmachine archive), and one fewer when anything else adds a device, such
 as published ports. The ceiling lives in libkrun, and smolvm has no preflight
-for it; see smolvm issue [[https://github.com/smol-machines/smolvm/issues/941][#941]].
+for it; see smolvm issue
+[[https://github.com/smol-machines/smolvm/issues/941][#941]].
 bind mode makes the ceiling irrelevant to the number of shared directories;
 direct mode is subject to it.
 ** Quick start
@@ -66,46 +67,36 @@ every login as a fallback.
 ** How to
 *** Add a volume
 Add a mount entry under the machine in vars.yml and run the default
-playbook. Whether the guest can stay running depends on the mode:
-
-- *Bind mode*: yes. The new directory rides inside the existing share
-  volume, so the run creates the share subdirectory, bind-mounts it on
-  the host, creates the target directory in the guest, and binds it from
-  the share — all while the machine runs.
-- *Direct mode*: no. The new mount becomes a new volume, and volume
-  changes require a stopped machine. A stopped machine is converged
-  during the run; a running machine halts the run with an ACTION
-  REQUIRED message, so stop it and re-run.
+playbook. Whether the guest can stay running depends on the mode.
+**** Bind mode: the guest can stay running
+The new directory rides inside the existing share volume, so the run
+creates the share subdirectory, bind-mounts it on the host, creates the
+target directory in the guest, and binds it from the share — all while
+the machine runs.
+**** Direct mode: the guest must be stopped
+The new mount becomes a new volume, and volume changes require a stopped
+machine. A stopped machine is converged during the run; a running machine
+halts the run with an ACTION REQUIRED message, so stop it and re-run.
 *** Remove a volume
-Delete the mount entry from vars.yml and run the default playbook.
-
-- *Bind mode*: the guest can stay running. The run unmounts everything
-  the ledger proves it created: the host-side bind, the emptied share
-  subdirectory, and the guest-side bind.
-- *Direct mode*: the guest must be stopped, because the volume itself is
-  removed.
-
-In both modes, guest target directories are never removed and no data is
-deleted.
+Delete the mount entry from vars.yml and run the default playbook. Guest
+target directories are never removed and no data is deleted in either
+mode. Whether the guest can stay running depends on the mode.
+**** Bind mode: the guest can stay running
+The run unmounts everything the ledger proves it created: the host-side
+bind, the emptied share subdirectory, and the guest-side bind.
+**** Direct mode: the guest must be stopped; the volume itself is removed
 *** Change a volume
-Changing the target path or the share name converges automatically:
-
-- *Bind mode*: the guest can stay running. The old binds are unmounted as
-  ledger-stale and the new ones are created.
-- *Direct mode*: the guest must be stopped, because the volume
-  re-creation is a volume change.
-
-Two changes need manual preparation, because the playbook refuses to
-repurpose an existing mount:
-
-- Changing the source directory of an existing mount fails the identity
-  check with a foreign-mount message.
-- Flipping readonly on an already-mounted pair is not applied
-  automatically.
-
-In both cases, unmount the old bind pair first — the host bind, and the
-guest bind through smolvm machine exec — or simply stop the guest, which
-clears its binds; then edit and re-run.
+Changing the target path or the share name converges automatically.
+Whether the guest can stay running depends on the mode.
+**** Bind mode: the guest can stay running; the old binds are replaced in place
+**** Direct mode: the guest must be stopped for the volume re-creation
+**** Manual preparation for source and readonly changes
+The playbook refuses to repurpose an existing mount. Changing the source
+directory of an existing mount fails the identity check with a
+foreign-mount message, and flipping readonly on an already-mounted pair
+is not applied automatically. In both cases, unmount the old bind pair
+first — the host bind, and the guest bind through smolvm machine exec —
+or simply stop the guest, which clears its binds; then edit and re-run.
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and
@@ -241,43 +232,41 @@ host fsyncs the disk files. Guest processes get no chance to clean up; it is
 sync-then-kill, like pulling power after sync, so save editor buffers first.
 The stop tag adds a redundant guest sync before stopping as belt-and-braces.
 ** Glossary
-- *bind mode*: one share volume per machine; each configured directory is
-  bind-mounted into the share root on the host and from the share to its
-  target path inside the guest.
-- *direct mode*: each configured directory is attached as its own smolvm
-  volume, with no share volume and no guest-side artifacts.
-- *device:inode identity*: the pair of device and inode numbers reported by
-  stat. Equal identity means two paths reference the same content; this is
-  how bind mounts are verified, because bind sources cannot be compared as
-  strings — the kernel reports them in normalized form.
-- *exec user*: the user as whom smolvm machine exec runs commands inside a
-  guest. Management operations require it to be root.
-- *foreign state*: any mount, volume, or file the ledger cannot prove the
-  playbook created. Refused or ignored, never removed.
-- *guest bind*: a bind mount inside the guest, from the share path to the
-  target path.
-- *host bind*: a bind mount on the host, from a configured source directory
-  to its share subdirectory.
-- *ledger*: the file .bind-mounts-state.yml inside the share root. It
-  records everything the playbook created, is written at the end of a
-  successful run, and is read at the start of the next; it is the basis of
-  provenance and stale-element cleanup.
-- *login hook*: the managed block in the machine user's .bash_profile that
-  re-applies the guest binds at every login through passwordless sudo.
-- *mount entry*: one configured host directory plus its guest target path
-  in vars.yml; the unit of sharing.
-- *share path*: the guest-side location of a mount entry inside the share:
-  share_target followed by the mount name.
-- *share root*: the host directory that holds one subdirectory per mount
-  entry; attached to each machine as one volume in bind mode.
-- *share target*: the path inside the guest at which the share root is
-  mounted.
-- *share volume*: the single smolvm volume backed by the share root; bind
-  mode only.
-- *stale element*: something the ledger proves the playbook created that
-  the current configuration no longer lists; removed during convergence.
-- *volume*: a host directory attached to a machine as its own virtiofs
-  device; each volume consumes one of the few device slots smolvm offers.
+*** Bind mode
+One share volume per machine; each configured directory is bind-mounted
+into the share root on the host and from the share to its target path
+inside the guest.
+*** Direct mode
+Each configured directory is attached as its own smolvm volume, with no
+share volume and no guest-side artifacts.
+*** Device:inode identity
+The pair of device and inode numbers reported by stat. Equal identity
+means two paths reference the same content; this is how bind mounts are
+verified, because bind sources cannot be compared as strings — the
+kernel reports them in normalized form.
+*** Exec user
+The user as whom smolvm machine exec runs commands inside a guest.
+Management operations require it to be root.
+*** Foreign state
+Any mount, volume, or file the ledger cannot prove the playbook created.
+Refused or ignored, never removed.
+*** Guest bind: a bind mount from the share path to the target path
+*** Guest-side share path: share_target followed by the mount name
+*** Host bind: a bind mount from a source directory to its share subdirectory
+*** Ledger
+The file .bind-mounts-state.yml inside the share root. It records
+everything the playbook created, is written at the end of a successful
+run, and is read at the start of the next; it is the basis of provenance
+and stale-element cleanup.
+*** Login hook
+The managed block in the machine user's .bash_profile that re-applies
+the guest binds at every login through passwordless sudo.
+*** Mount entry: one host directory plus its guest target path in vars.yml
+*** share_root: the host directory holding one subdirectory per mount entry
+*** share_target: the guest path at which the share root is mounted
+*** Share volume: the one smolvm volume backed by the share root
+*** Stale element: ledger-proven state the configuration no longer lists
+*** Volume: a host directory attached to a machine as its own virtiofs device
 ** Troubleshooting
 *** A missing vars.yml fails fast with copy instructions
 *** A target mounted with a different source needs manual resolution
@@ -289,7 +278,8 @@ after stopping: the run attaches the volume, starts the machine, and
 finishes the rest.
 *** An exceeded volume budget counts hand-attached volumes too
 Remove mounts from vars.yml, or raise max_volumes only if you know the
-machine has headroom; see smolvm issue [[https://github.com/smol-machines/smolvm/issues/941][#941]].
+machine has headroom; see smolvm issue
+[[https://github.com/smol-machines/smolvm/issues/941][#941]].
 *** An unreadable ledger disables cleanup for that run
 Fix or delete the ledger file; deleting it loses only the cleanup
 bookkeeping.
