@@ -92,12 +92,21 @@ Whether the guest can stay running depends on the mode.
 **** Bind mode: the guest can stay running; the old binds are replaced in place
 **** Direct mode: the guest must be stopped for the volume re-creation
 **** Manual preparation for source and readonly changes
-The playbook refuses to repurpose an existing mount. Changing the source
-directory of an existing mount fails the identity check with a
-foreign-mount message, and flipping readonly on an already-mounted pair
-is not applied automatically. In both cases, unmount the old bind pair
-first (the host bind, and the guest bind through smolvm machine exec),
-or simply stop the guest, which clears its binds; then edit and re-run.
+Two kinds of change need a manual unmount first. Both apply when the
+share name stays the same; a mount whose share name also changes is torn
+down and rebuilt automatically instead.
+***** Changing the source directory while keeping the share name
+The identity check compares the configured source against what the share
+subdirectory is bound from, and the check fails with a foreign-mount
+message. Whether the target path also changes makes no difference: the
+failure keys on the source and the share name alone.
+***** Flipping readonly on an already-mounted pair is not applied automatically
+The new setting takes effect only when the pair is mounted fresh. The
+share name staying the same is what makes it an already-mounted pair.
+***** Recovering: unmount the old bind pair or stop the guest
+The host bind is unmounted on the host; the guest bind is unmounted
+through smolvm machine exec. Stopping the guest instead clears its binds
+at once. Then edit and re-run.
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and
