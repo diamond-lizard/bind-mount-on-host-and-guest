@@ -31,7 +31,7 @@ mounts, and the vsock agent channel share the rest, so a directly created
 machine fits at most 4 host volumes (3 for machines created from a packed
 .smolmachine archive), and one fewer when anything else adds a device, such
 as published ports. The ceiling lives in libkrun, and smolvm has no preflight
-for it; see [[https://github.com/smol-machines/smolvm/issues/941][issue #941]].
+for it; see smolvm issue [[https://github.com/smol-machines/smolvm/issues/941][#941]].
 bind mode makes the ceiling irrelevant to the number of shared directories;
 direct mode is subject to it.
 ** Quick start
@@ -251,8 +251,7 @@ after stopping: the run attaches the volume, starts the machine, and
 finishes the rest.
 *** An exceeded volume budget counts hand-attached volumes too
 Remove mounts from vars.yml, or raise max_volumes only if you know the
-machine has headroom; see
-[[https://github.com/smol-machines/smolvm/issues/941][issue #941]].
+machine has headroom; see smolvm issue [[https://github.com/smol-machines/smolvm/issues/941][#941]].
 *** An unreadable ledger disables cleanup for that run
 Fix or delete the ledger file; deleting it loses only the cleanup
 bookkeeping.
