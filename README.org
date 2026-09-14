@@ -1,7 +1,8 @@
 * bind-mounts: share host directories with smolvm guests
 ** Overview
 bind-mounts is one Ansible playbook, driven by a single configuration file,
-that shares host directories with smolvm guests.
+that shares host directories with
+[[https://github.com/smol-machines/smolvm/][smolvm]] guests.
 
 One default run validates the configuration, attaches the configured
 host directories to each machine, bind-mounts them at their target
