@@ -49,17 +49,20 @@ vars.yml ──▶ bind-mounts.yml ──▶ smolvm machine update --volume <src
 ** Modes
 *** Bind mode
 One volume slot per machine regardless of mount count. Guests see bind mounts
-from the share, and the login hook re-applies them at login. The volume is
-attached once with the attach tag while the machine is stopped.
+from the share, and the login hook re-applies them at login. The default run
+attaches the share volume to a stopped machine that lacks it and halts with
+an ACTION REQUIRED message when a running machine needs volume changes; the
+attach tag converges volumes explicitly on stopped machines.
 *** Direct mode
 One volume per configured mount, managed by machine update, with no
 guest-side artifacts and nothing to run at login. Subject to the volume
 ceiling.
 *** Switching between modes
-Stop the machines, change mode in the configuration, run the attach tag, then
-start the machines and run the default playbook. The attach step converges
-the volume set in both directions and removes bind-mode artifacts when
-switching to direct.
+Stop the machines, change mode in the configuration, and run the default
+playbook. The run converges the volume set in both directions, removes
+bind-mode artifacts when switching to direct, starts the machines, and
+verifies the result. The attach tag remains available for explicit,
+step-by-step convergence on stopped machines.
 ** smolvm constraints
 *** The volume ceiling is a libkrun device budget
 x86_64 exposes 11 virtio-mmio IRQs, one per virtio device. Balloon, rng,

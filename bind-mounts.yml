@@ -277,7 +277,128 @@
           ledger file to re-enable cleanup.
       when: not ledger_usable
       tags: [always]
+    - name: Compute the volume convergence plan per machine
+      ansible.builtin.set_fact:
+        volume_plans: >-
+          {%- set result = {} -%}
+          {%- for m in normalized -%}
+          {%- set observed = smolvm_sections[m.name].mounts -%}
+          {%- set observed_targets = observed | map(attribute='target') | list -%}
+          {%- set entry = (ledger.machines | default({})).get(m.name, {}) -%}
+          {%- if config.mode == 'bind' -%}
+          {%- set desired = [{'src': config.share_root, 'target': config.share_target, 'ro': false}] -%}
+          {%- else -%}
+          {%- set desired = [] -%}
+          {%- for mnt in all_mounts | selectattr('machine', 'eq', m.name) -%}
+          {%- set _ = desired.append({'src': mnt.src, 'target': mnt.target, 'ro': mnt.readonly}) -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {%- set desired_targets = desired | map(attribute='target') | list -%}
+          {%- set managed = [] -%}
+          {%- if entry.get('share_volume', false) -%}
+          {%- set _ = managed.append({'src': config.share_root, 'target': config.share_target}) -%}
+          {%- endif -%}
+          {%- for v in entry.get('volumes', []) -%}
+          {%- set _ = managed.append({'src': v.src, 'target': v.target}) -%}
+          {%- endfor -%}
+          {%- set stale_managed = managed | rejectattr('target', 'in', desired_targets) | list -%}
+          {%- set stale_targets = stale_managed | map(attribute='target') | list -%}
+          {%- set external = observed | rejectattr('target', 'in', desired_targets + stale_targets) | list -%}
+          {%- set adds = [] -%}
+          {%- for v in desired -%}
+          {%- if v.target not in observed_targets -%}
+          {%- set spec = '--volume=' ~ v.src ~ ':' ~ v.target ~ (':ro' if v.ro else '') -%}
+          {%- set _ = adds.append(spec) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- set removes = [] -%}
+          {%- for v in stale_managed -%}
+          {%- set _ = removes.append('--remove-volume=' ~ v.src ~ ':' ~ v.target) -%}
+          {%- endfor -%}
+          {%- set _ = result.update({m.name: {
+                'add': adds,
+                'remove': removes,
+                'external': external | length,
+                'desired_count': desired | length,
+              }}) -%}
+          {%- endfor -%}
+          {{ result }}
+      tags: [attach, always]
 
+    - name: Collect running machines that need volume changes (default run)
+      ansible.builtin.set_fact:
+        volume_changes_blocked: "{{ volume_changes_blocked | default([]) + [m.name] }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when:
+        - (volume_plans[m.name].add + volume_plans[m.name].remove) | length > 0
+        - smolvm_sections[m.name].state == 'running'
+        - ansible_run_tags | intersect(['all', 'mounts', 'install', 'verify', 'start']) | length > 0
+      tags: [always]
+
+    - name: >-
+        ACTION REQUIRED: volume changes are pending on running machines
+      ansible.builtin.debug:
+        msg:
+          - "{{ '=' * 70 }}"
+          - "{{ '%-70s' | format('  ' ~ (volume_changes_blocked | length) ~ ' machine(s) running with pending volume changes:') }}"
+          - "{{ '%-70s' | format('    ' ~ (volume_changes_blocked | join(', '))) }}"
+          - "{{ '%-70s' | format('  Volume changes require a stopped machine.') }}"
+          - "{{ '%-70s' | format('  For each machine listed above, run:') }}"
+          - "{{ '%-70s' | format('      smolvm machine stop --name <machine-name>') }}"
+          - "{{ '%-70s' | format('  Then re-run this playbook: it will apply the volume changes, start') }}"
+          - "{{ '%-70s' | format('  the machines, and finish the rest.') }}"
+          - "{{ '%-70s' | format('  Nothing else was changed by this run.') }}"
+          - "{{ '=' * 70 }}"
+      when: volume_changes_blocked | default([]) | length > 0
+      tags: [always]
+
+    - name: Stop because volume changes are pending on running machines
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: stop the machine(s) listed in the box above, then re-run this playbook."
+      when: volume_changes_blocked | default([]) | length > 0
+      tags: [always]
+
+    - name: Enforce the volume budget before the default-run attach
+      ansible.builtin.assert:
+        that:
+          - volume_plans[m.name].desired_count + volume_plans[m.name].external <= m.max_volumes
+        msg: >-
+          Machine '{{ m.name }}': {{ volume_plans[m.name].desired_count }}
+          desired volume(s) + {{ volume_plans[m.name].external }} external
+          volume(s) exceed max_volumes={{ m.max_volumes }}. The smolvm volume
+          ceiling is a hard device budget
+          (https://github.com/smol-machines/smolvm/issues/941): remove mounts
+          from vars.yml, or set max_volumes explicitly only if you know the
+          machine has headroom.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when:
+        - (volume_plans[m.name].add + volume_plans[m.name].remove) | length > 0
+        - smolvm_sections[m.name].state == 'stopped'
+        - ansible_run_tags | intersect(['all', 'mounts', 'install', 'verify', 'start']) | length > 0
+      tags: [always]
+
+    - name: Apply volume changes to stopped machines (default run)
+      ansible.builtin.command:
+        argv: "{{ ['smolvm', 'machine', 'update', '--name', m.name]
+                  + volume_plans[m.name].add + volume_plans[m.name].remove }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: default_volume_update
+      changed_when: default_volume_update.rc == 0
+      when:
+        - (volume_plans[m.name].add + volume_plans[m.name].remove) | length > 0
+        - smolvm_sections[m.name].state == 'stopped'
+        - ansible_run_tags | intersect(['all', 'mounts', 'install', 'verify', 'start']) | length > 0
+        - not ansible_check_mode
+      tags: [always]
     # ================================================================
     # 4. Host-side bind mounts (bind mode)
     # ================================================================
@@ -487,53 +608,6 @@
     # ================================================================
     # 6. Volume convergence (--tags attach; stopped machines only)
     # ================================================================
-    - name: Compute the volume convergence plan per machine
-      ansible.builtin.set_fact:
-        volume_plans: >-
-          {%- set result = {} -%}
-          {%- for m in normalized -%}
-          {%- set observed = smolvm_sections[m.name].mounts -%}
-          {%- set observed_targets = observed | map(attribute='target') | list -%}
-          {%- set entry = (ledger.machines | default({})).get(m.name, {}) -%}
-          {%- if config.mode == 'bind' -%}
-          {%- set desired = [{'src': config.share_root, 'target': config.share_target, 'ro': false}] -%}
-          {%- else -%}
-          {%- set desired = [] -%}
-          {%- for mnt in all_mounts | selectattr('machine', 'eq', m.name) -%}
-          {%- set _ = desired.append({'src': mnt.src, 'target': mnt.target, 'ro': mnt.readonly}) -%}
-          {%- endfor -%}
-          {%- endif -%}
-          {%- set desired_targets = desired | map(attribute='target') | list -%}
-          {%- set managed = [] -%}
-          {%- if entry.get('share_volume', false) -%}
-          {%- set _ = managed.append({'src': config.share_root, 'target': config.share_target}) -%}
-          {%- endif -%}
-          {%- for v in entry.get('volumes', []) -%}
-          {%- set _ = managed.append({'src': v.src, 'target': v.target}) -%}
-          {%- endfor -%}
-          {%- set stale_managed = managed | rejectattr('target', 'in', desired_targets) | list -%}
-          {%- set stale_targets = stale_managed | map(attribute='target') | list -%}
-          {%- set external = observed | rejectattr('target', 'in', desired_targets + stale_targets) | list -%}
-          {%- set adds = [] -%}
-          {%- for v in desired -%}
-          {%- if v.target not in observed_targets -%}
-          {%- set spec = '--volume=' ~ v.src ~ ':' ~ v.target ~ (':ro' if v.ro else '') -%}
-          {%- set _ = adds.append(spec) -%}
-          {%- endif -%}
-          {%- endfor -%}
-          {%- set removes = [] -%}
-          {%- for v in stale_managed -%}
-          {%- set _ = removes.append('--remove-volume=' ~ v.src ~ ':' ~ v.target) -%}
-          {%- endfor -%}
-          {%- set _ = result.update({m.name: {
-                'add': adds,
-                'remove': removes,
-                'external': external | length,
-                'desired_count': desired | length,
-              }}) -%}
-          {%- endfor -%}
-          {{ result }}
-      tags: [attach, never]
 
     - name: Refuse volume changes on running machines
       ansible.builtin.fail:
@@ -597,6 +671,7 @@
       when:
         - config.mode == 'bind'
         - smolvm_sections[m.name].state != 'running'
+        - not ansible_check_mode
       tags: [install]
 
     - name: Fail when the smolvm exec user is not root
@@ -897,6 +972,7 @@
         label: "{{ m.name }}"
       when:
         - config.mode == 'bind'
+        - m.mounts | length > 0
         - smolvm_sections[m.name].state != 'running'
       tags: [mounts]
 

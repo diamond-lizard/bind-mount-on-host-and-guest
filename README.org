@@ -19,8 +19,9 @@ share to each machine as a single volume, and inside the guest bind-mounts
 each entry from the share to its real target path, so one volume slot serves
 any number of directories. In direct mode every configured directory becomes
 its own smolvm volume, which is simpler inside the guest but uses one volume
-slot per directory. Switching modes is a one-line configuration change plus
-one playbook run.
+slot per directory. Switching modes is a one-line configuration change:
+stop the machines, change the mode, and run the playbook once — it converges
+the volume set, restarts the machines, and verifies the result.
 
 The mode choice exists because of a smolvm constraint: a directory attached
 directly is its own virtiofs device, and libkrun (the VMM underneath) caps
@@ -51,17 +52,27 @@ ansible-playbook bind-mounts.yml -i inventory -K
 
 -K prompts once for the sudo password, because host sudo has no passwordless
 rule. The default run validates the configuration, bind-mounts the sources
-into share_root, starts each machine if it is stopped, installs the login
-hook, applies the guest-side bind mounts, and verifies the result. The guest
-may be running or stopped; a stopped machine is started automatically, so
-nothing needs to be stopped or started by hand first.
+into share_root, attaches missing volumes to stopped machines, starts each
+machine if it is stopped, installs the login hook, applies the guest-side
+bind mounts, and verifies the result. The guest may be running or stopped; a
+stopped machine is started automatically, so nothing needs to be stopped or
+started by hand first. A running machine that needs a volume change halts
+the run with a boxed ACTION REQUIRED message naming the machine and the
+command to run; stop it and re-run.
 *** 3 Log in and use the machines
 Log in as usual with smolvm machine exec. The mounts are already in place,
 and the installed .bash_profile hook re-applies them non-interactively at
 every login as a fallback.
-** 2 One-time volume attachment
-A machine needs the share volume attached exactly once in bind mode. Stop the
-machine, run the attach tag, then start it again.
+** 2 Volume attachment
+In bind mode every machine carries the share volume; in direct mode every
+configured mount is its own volume. The default run keeps this true by
+itself: a stopped machine whose volume set is missing or stale gets
+converged during the run, and a running machine that needs volume changes
+halts the run with a boxed ACTION REQUIRED message naming the machine and
+the command to run; stop it and re-run the playbook to converge.
+
+For explicit control, the attach tag converges the volume set on stopped
+machines and refuses running ones:
 
 #+BEGIN_SRC
 smolvm machine stop --name my-vm
@@ -69,9 +80,8 @@ ansible-playbook bind-mounts.yml -i inventory --tags attach
 smolvm machine start --name my-vm
 #+END_SRC
 
-attach refuses to run against a running machine and never stops anything on
-its own. A machine that already has the volume attached needs nothing: the
-default run never changes the volume set.
+attach never stops anything on its own, and machines whose volume set
+already matches the configuration are left untouched by both paths.
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and
@@ -119,8 +129,10 @@ Direct mode appends :ro to the volume; bind mode remounts the bind read-only.
 They default to the machine-level uid and gid.
 ** Tag reference
 *** The default run
-Validate, host binds, start, install, guest binds, verify. Works whether the
-guests are running or stopped.
+Validate, volume convergence for stopped machines, host binds, start,
+install, guest binds, verify. Works whether the guests are running or
+stopped; a running machine that needs volume changes halts the run with an
+ACTION REQUIRED message naming the machine and the command to run.
 *** mounts
 Host binds and guest binds only. Refuses stopped machines, because guest
 binds need a running guest.
@@ -144,22 +156,21 @@ ansible-playbook bind-mounts.yml -i inventory --tags stop
 #+END_SRC
 *** 2 Change the mode or the mount list
 Edit mode and the machines list in vars.yml.
-*** 3 Converge the volume set
+*** 3 Run the default playbook
 #+BEGIN_SRC
-ansible-playbook bind-mounts.yml -i inventory --tags attach
+ansible-playbook bind-mounts.yml -i inventory
 #+END_SRC
 
-Bind to direct: every mount becomes a volume, the share volume is removed,
-and the guest-side login hook, sudoers rule, and installed script are
-removed. Direct to bind: the share volume is attached and former mount
+The run converges the volume set on the stopped machines and starts them
+again. Bind to direct: every mount becomes a volume, the share volume is
+removed, and the guest-side login hook, sudoers rule, and installed script
+are removed. Direct to bind: the share volume is attached and former mount
 volumes are removed. Only volumes the ledger proves the playbook created are
 ever removed; hand-attached volumes, such as a persistent home directory, are
 untouched but still count against max_volumes.
-*** 4 Start the machines and run the default playbook
-#+BEGIN_SRC
-ansible-playbook bind-mounts.yml -i inventory --tags start
-ansible-playbook bind-mounts.yml -i inventory
-#+END_SRC
+
+For step-by-step control you can still converge explicitly with --tags
+attach after stopping, and start the machines with --tags start.
 ** Safety model
 *** The provenance ledger records everything the playbook creates
 The ledger lives beside the share subdirectories and records volumes, host
