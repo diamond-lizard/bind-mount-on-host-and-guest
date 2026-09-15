@@ -474,29 +474,50 @@
           - -c
           - |
             import os, subprocess, sys
-            src, tgt = sys.argv[1], sys.argv[2]
-            p = subprocess.run(["findmnt", "-rn", "-o", "TARGET", "-M", tgt],
-                               capture_output=True, text=True)
-            mounted = p.returncode == 0 and p.stdout.strip() == tgt
-            try:
-                sa = os.stat(src); src_id = "%d:%d" % (sa.st_dev, sa.st_ino)
-            except OSError as e:
-                src_id = "STAT-ERROR: %s" % e
-            try:
-                sb = os.stat(tgt); tgt_id = "%d:%d" % (sb.st_dev, sb.st_ino)
-            except OSError as e:
-                tgt_id = "STAT-ERROR: %s" % e
-            print("DIAG: src=%r src_id=%s tgt=%r tgt_id=%s mounted=%s"
-                  % (src, src_id, tgt, tgt_id, mounted))
-            if not mounted:
-                print("NEEDS-MOUNT: %s is not a mountpoint" % tgt)
+            src, tgt, recorded, machine, state, guest_target, force = sys.argv[1:8]
+            def stat_id(path):
+                try:
+                    st = os.stat(path)
+                    return f"{st.st_dev}:{st.st_ino}"
+                except OSError:
+                    return None
+            def findmnt(field):
+                return subprocess.run(["findmnt", "-rn", "-o", field, "-M", tgt],
+                                      capture_output=True, text=True)
+            p = findmnt("TARGET")
+            if p.returncode != 0 or p.stdout.strip() != tgt:
+                print("REMEDIATE: not mounted", file=sys.stderr)
                 sys.exit(10)
-            if src_id != tgt_id:
-                print("FOREIGN: %s is a mountpoint bound from different content than %s" % (tgt, src), file=sys.stderr)
-                sys.exit(3)
-            print("OK: %s bound from %s" % (tgt, src))
+            opts = findmnt("OPTIONS").stdout.strip()
+            ro_now = "ro" in opts.split(",")
+            print(f"RO-STATE: {'ro' if ro_now else 'rw'}")
+            src_id, tgt_id = stat_id(src), stat_id(tgt)
+            if src_id is not None and src_id == tgt_id:
+                print(f"OK: {tgt} bound from {src}")
+                sys.exit(0)
+            rec_id = stat_id(recorded) if recorded else None
+            ours = rec_id is not None and rec_id == tgt_id
+            if ours or force == "true":
+                subprocess.run(["umount", tgt], check=True)
+                why = "proven ours by ledger" if ours else "forced by user"
+                print(f"REMEDIATED: stale bind at {tgt} unmounted ({why}); re-binding from {src}")
+                sys.exit(10)
+            print(f"FOREIGN: {tgt} is bound from different content than {src}, and the ledger does not prove this bind is ours", file=sys.stderr)
+            print(f"FOREIGN: forcing will unmount and replace: host bind {tgt}", file=sys.stderr)
+            if state == "running":
+                print(f"FOREIGN:   plus guest bind {guest_target} (machine {machine} is running)", file=sys.stderr)
+            print("FOREIGN: re-run with -e bind_mounts_force_remount=true to accept, or unmount manually:", file=sys.stderr)
+            print(f"FOREIGN:   host: sudo umount {tgt}", file=sys.stderr)
+            if state == "running":
+                print(f"FOREIGN:   guest: smolvm machine exec --name {machine} -- umount {guest_target}", file=sys.stderr)
+            sys.exit(3)
           - "{{ item.src }}"
           - "{{ share_root_resolved ~ '/' ~ item.name }}"
+          - "{{ (ledger.machines | default({})).get(item.machine, {}).get('host_binds', []) | selectattr('target', 'eq', share_root_resolved ~ '/' ~ item.name) | map(attribute='source') | first | default('') }}"
+          - "{{ item.machine }}"
+          - "{{ smolvm_sections[item.machine].state }}"
+          - "{{ item.target }}"
+          - "{{ bind_mounts_force_remount | default(false) | bool | string | lower }}"
       loop: "{{ all_mounts }}"
       loop_control:
         extended: true
@@ -507,6 +528,44 @@
       failed_when: host_bind_probe.rc != 0 and host_bind_probe.rc != 10
       when: config.mode == 'bind'
       tags: [mounts, verify]
+      tags: [mounts, verify]
+    - name: Remount host binds whose readonly state drifted
+      ansible.builtin.command: "mount -o remount,{{ 'ro' if item.readonly else 'rw' }},bind {{ (share_root_resolved ~ '/' ~ item.name) | quote }}"
+      become: true
+      loop: "{{ all_mounts }}"
+      loop_control:
+        extended: true
+        label: "{{ item.machine }}:{{ item.name }}"
+      register: host_ro_drift
+      changed_when: host_ro_drift.rc == 0
+      when:
+        - config.mode == 'bind'
+        - host_bind_probe.results[ansible_loop.index0].rc == 0
+        - item.readonly != ('RO-STATE: ro' in host_bind_probe.results[ansible_loop.index0].stdout)
+        - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Unmount guest binds whose source changed (running machines)
+      vars:
+        remediated_targets: >-
+          {{ host_bind_probe.results
+             | selectattr('stdout', 'search', 'REMEDIATED')
+             | map(attribute='item.target') | list }}
+      ansible.builtin.command:
+        argv: "{{ ['smolvm', 'machine', 'exec', '--name', item.machine, '--', 'umount', item.target] }}"
+      loop: "{{ all_mounts }}"
+      loop_control:
+        label: "{{ item.machine }}:{{ item.target }}"
+      register: guest_src_umount
+      changed_when: guest_src_umount.rc == 0
+      failed_when: false
+      when:
+        - config.mode == 'bind'
+        - item.target in remediated_targets
+        - smolvm_sections[item.machine].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts]
+
     - name: Bind host source directories into the share
       ansible.builtin.command: "mount --bind {{ item.src | quote }} {{ (share_root_resolved ~ '/' ~ item.name) | quote }}"
       become: true
