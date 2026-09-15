@@ -2,11 +2,12 @@
 """Managed by bind-mounts.yml (ansible). Helper: verify ONE guest mount.
 
 Identity check compares device and inode of the target against the expected
-share source (bind mounts share stat identity with their source).
+share source (bind mounts share stat identity with their source). In bind
+mode the target's readonly state is also compared against the expectation.
 
-Usage: guest-verify-one.py bind <target> <expected-share-source>
+Usage: guest-verify-one.py bind <target> <expected-share-source> <readonly>
        guest-verify-one.py direct <target>
-Exit codes: 0 = verified; 1 = not mounted or wrong source.
+Exit codes: 0 = verified; 1 = not mounted, wrong source, or wrong ro state.
 """
 import os
 import subprocess
@@ -27,8 +28,8 @@ def stat_id(path):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
-        print("usage: guest-verify-one.py bind <target> <expected-source> | direct <target>", file=sys.stderr)
+    if len(sys.argv) not in (3, 5):
+        print("usage: guest-verify-one.py bind <target> <expected-source> <readonly> | direct <target>", file=sys.stderr)
         return 2
     mode, target = sys.argv[1], sys.argv[2]
     expected = sys.argv[3] if len(sys.argv) > 3 else None
@@ -37,9 +38,17 @@ def main():
         print(f"verify FAIL (guest): {target} is not mounted", file=sys.stderr)
         return 1
     if mode == "bind":
-        share = sys.argv[3]
+        share, readonly = sys.argv[3], sys.argv[4]
         if stat_id(target) != stat_id(share):
             print(f"verify FAIL (guest): {target} does not match {share} (device:inode differ)", file=sys.stderr)
+            return 1
+        opts = subprocess.run(
+            ["findmnt", "-rn", "-o", "OPTIONS", "-M", target],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        ro_now = "ro" in opts.split(",")
+        if (readonly == "true") != ro_now:
+            print(f"verify FAIL (guest): {target} is {'read-only' if ro_now else 'read-write'} but config wants {'read-only' if readonly == 'true' else 'read-write'}", file=sys.stderr)
             return 1
     print(f"verify ok (guest): {target}")
     return 0

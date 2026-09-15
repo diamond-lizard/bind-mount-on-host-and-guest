@@ -1178,7 +1178,7 @@
           - -c
           - |
             import os, subprocess, sys
-            src, tgt = sys.argv[1], sys.argv[2]
+            src, tgt, readonly = sys.argv[1], sys.argv[2], sys.argv[3]
             p = subprocess.run(["findmnt", "-rn", "-o", "TARGET", "-M", tgt],
                                capture_output=True, text=True)
             if p.returncode != 0 or p.stdout.strip() != tgt:
@@ -1188,9 +1188,16 @@
             if (sa.st_dev, sa.st_ino) != (sb.st_dev, sb.st_ino):
                 print("verify FAIL (host): %s does not match %s (device:inode differ)" % (tgt, src), file=sys.stderr)
                 sys.exit(1)
+            opts = subprocess.run(["findmnt", "-rn", "-o", "OPTIONS", "-M", tgt],
+                                  capture_output=True, text=True).stdout.strip()
+            ro_now = "ro" in opts.split(",")
+            if (readonly == "true") != ro_now:
+                print("verify FAIL (host): %s is %s but config wants %s" % (tgt, 'read-only' if ro_now else 'read-write', 'read-only' if readonly == 'true' else 'read-write'), file=sys.stderr)
+                sys.exit(1)
             print("verify ok (host): %s" % tgt)
           - "{{ item.src }}"
           - "{{ share_root_resolved ~ '/' ~ item.name }}"
+          - "{{ item.readonly | string | lower }}"
       loop: "{{ all_mounts }}"
       loop_control:
         label: "{{ item.machine }}:{{ item.name }}"
@@ -1213,6 +1220,7 @@
           - bind
           - "{{ item.target }}"
           - "{{ item.share_path }}"
+          - "{{ item.readonly | string | lower }}"
       loop: "{{ all_mounts }}"
       loop_control:
         label: "{{ item.machine }}:{{ item.target }}"
