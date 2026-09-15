@@ -559,9 +559,33 @@
       register: host_bind_probe
       changed_when: false
       check_mode: false
-      failed_when: host_bind_probe.rc != 0 and host_bind_probe.rc != 10
+      failed_when: host_bind_probe.rc != 0 and host_bind_probe.rc != 10 and host_bind_probe.rc != 4
       when: config.mode == 'bind'
       tags: [mounts, verify]
+
+    - name: Collect machines with stale binds that need a stopped machine
+      ansible.builtin.set_fact:
+        stale_needing_stop: "{{ stale_needing_stop | default([]) + [item.item.machine] }}"
+      loop: "{{ host_bind_probe.results }}"
+      loop_control:
+        extended: true
+      when:
+        - config.mode == 'bind'
+        - item.rc is defined and item.rc == 4
+      tags: [mounts, verify]
+
+    - name: ACTION REQUIRED stale mounts need a stopped machine
+      ansible.builtin.fail:
+        msg: >-
+          {{ stale_needing_stop | unique | length }} machine(s) are running with
+          stale mounts that cannot be replaced while running (libkrun pins the
+          old bind): {{ stale_needing_stop | unique | join(', ') }}. For each
+          machine listed, run: smolvm machine stop --name <machine-name>; then
+          re-run this playbook — the stale bind is remediated while the machine
+          is stopped. Nothing else was changed by this run.
+      when: stale_needing_stop | default([]) | length > 0
+      tags: [mounts, verify]
+
     - name: Compute per-mount readonly drift
       ansible.builtin.set_fact:
         ro_drift: "{{ ro_drift | default({}) | combine({item.machine ~ ':' ~ item.name: (item.readonly != ('RO-STATE: ro' in host_bind_probe.results[ansible_loop.index0].stdout))}) }}"
