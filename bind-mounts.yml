@@ -1016,8 +1016,65 @@
       loop_control:
         label: "{{ item.machine }}:{{ item.target }}"
       register: guest_mount_result
-      changed_when: "'mounted:' in guest_mount_result.stdout"
-      failed_when: guest_mount_result.rc != 0
+      failed_when: false
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[item.machine].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Fail on foreign guest mounts the ledger cannot prove
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.item.target }} is a mountpoint whose content differs from
+          {{ item.item.share_path }}, and the ledger has no guest-bind entry
+          proving it is ours. Unmount it manually via smolvm machine exec.
+      loop: "{{ guest_mount_result.results }}"
+      loop_control:
+        label: "{{ item.item.machine }}:{{ item.item.target }}"
+      when:
+        - item.rc is defined and item.rc == 3
+        - (ledger.machines | default({})).get(item.item.machine, {}).get('guest_binds', [])
+          | selectattr('target', 'eq', item.item.target) | list | length == 0
+      tags: [mounts]
+
+    - name: Unmount proven-own guest binds the helper refused
+      ansible.builtin.command:
+        argv: "{{ ['smolvm', 'machine', 'exec', '--name', item.item.machine, '--', 'umount', item.item.target] }}"
+      loop: "{{ guest_mount_result.results }}"
+      loop_control:
+        label: "{{ item.item.machine }}:{{ item.item.target }}"
+      register: guest_foreign_umount
+      changed_when: guest_foreign_umount.results[ansible_loop.index0].rc == 0
+      failed_when: false
+      when:
+        - item.rc is defined and item.rc == 3
+        - (ledger.machines | default({})).get(item.item.machine, {}).get('guest_binds', [])
+          | selectattr('target', 'eq', item.item.target) | list | length > 0
+      tags: [mounts]
+
+    - name: Re-mount guest binds after remediation
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ item.machine }}"
+          - --
+          - python3
+          - /tmp/guest-mount-one.py
+          - "{{ item.target }}"
+          - "{{ item.share_path }}"
+          - "{{ item.uid_eff | string }}"
+          - "{{ item.gid_eff | string }}"
+          - "{{ item.readonly | string | lower }}"
+      loop: "{{ guest_mount_result.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 3) | map(attribute='item') | list }}"
+      loop_control:
+        label: "{{ item.machine }}:{{ item.target }}"
+      register: guest_mount_retry
+      changed_when: "'mounted:' in guest_mount_retry.stdout or 'remounted:' in guest_mount_retry.stdout"
+      failed_when: guest_mount_retry.rc != 0
       when:
         - config.mode == 'bind'
         - smolvm_sections[item.machine].state == 'running'
