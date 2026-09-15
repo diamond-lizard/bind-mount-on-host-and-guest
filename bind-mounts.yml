@@ -569,6 +569,7 @@
       loop: "{{ host_bind_probe.results }}"
       loop_control:
         extended: true
+        label: "{{ item.item.machine | default('') }}:{{ item.item.name | default('') }}"
       when:
         - config.mode == 'bind'
         - item.rc is defined and item.rc == 4
