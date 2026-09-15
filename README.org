@@ -99,7 +99,9 @@ directory change cannot be applied live: libkrun pins the old host bind
 for as long as the machine runs, so the run halts with an ACTION REQUIRED
 message naming the machine; stop it and re-run, and the stale bind is
 unmounted and re-bound from the new source before the machine starts. A
-rename converges the same way through the ledger-stale cleanup.
+rename (the share name changes while the source and target stay)
+converges the same way through the ledger-stale cleanup, with the same
+stopped-machine rule.
 **** Direct mode: the guest must be stopped for the volume re-creation
 A source or readonly change removes and re-adds the volume, so the
 stopped-machine rule for volume changes applies.

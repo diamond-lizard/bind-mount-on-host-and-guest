@@ -141,8 +141,11 @@ An unproven bind fails the run with every affected host and guest path
 listed; re-running with -e bind_mounts_force_remount=true forces
 replacement once the machine is stopped.
 *** Stale binds are unmounted, pruned, and never force-deleted
-Guest binds are unmounted deep first; host bind targets are unmounted and
-removed only when empty.
+Ledger-stale host binds carry their owning machine. A proven-stale bind on
+a running machine is collected into the ACTION REQUIRED summary instead of
+being unmounted; the umount runs only for stopped machines, where libkrun
+cannot hold the bind. Guest binds are unmounted deep first; host bind
+targets are unmounted and removed only when empty.
 *** Wrong source or readonly drift at a target is caught by device:inode and options comparison
 Host and guest identity checks compare the target's device and inode
 against the configured source, and both verify tasks also compare the
