@@ -286,11 +286,11 @@
           {%- set observed_targets = observed | map(attribute='target') | list -%}
           {%- set entry = (ledger.machines | default({})).get(m.name, {}) -%}
           {%- if config.mode == 'bind' -%}
-          {%- set desired = [{'src': config.share_root, 'target': config.share_target, 'ro': false}] -%}
+          {%- set desired = [{'src': share_root_resolved, 'target': config.share_target, 'ro': false}] -%}
           {%- else -%}
           {%- set desired = [] -%}
           {%- for mnt in all_mounts | selectattr('machine', 'eq', m.name) -%}
-          {%- set _ = desired.append({'src': mnt.src, 'target': mnt.target, 'ro': mnt.readonly}) -%}
+          {%- set _ = desired.append({'src': mnt.src | realpath, 'target': mnt.target, 'ro': mnt.readonly}) -%}
           {%- endfor -%}
           {%- endif -%}
           {%- set desired_targets = desired | map(attribute='target') | list -%}
@@ -559,7 +559,6 @@
       check_mode: false
       failed_when: host_bind_probe.rc != 0 and host_bind_probe.rc != 10
       when: config.mode == 'bind'
-      tags: [mounts, verify]
       tags: [mounts, verify]
     - name: Remount host binds whose readonly state drifted
       ansible.builtin.command: "mount -o remount,{{ 'ro' if item.readonly else 'rw' }},bind {{ (share_root_resolved ~ '/' ~ item.name) | quote }}"
