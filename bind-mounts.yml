@@ -414,29 +414,37 @@
              | map('regex_replace', '^', share_root_resolved ~ '/') | list }}
       tags: [always]
 
+    - name: Collect ledger-stale host binds with their machines
+      ansible.builtin.set_fact:
+        stale_host_binds: >-
+          {%- set out = [] -%}
+          {%- for e in (ledger.machines | default({})) | dict2items -%}
+          {%- for b in e.value.get('host_binds', []) -%}
+          {%- if b.target not in expected_host_targets -%}
+          {%- set _ = out.append(b | combine({'machine': e.key})) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ out }}
+      tags: [mounts]
+
     - name: Stat the ledger-recorded sources of stale host binds
       ansible.builtin.stat:
         path: "{{ item.source }}"
-      loop: >-
-        {{ ledger.machines | dict2items
-           | map(attribute='value.host_binds', default=[]) | flatten
-           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop: "{{ stale_host_binds }}"
       loop_control:
         extended: true
-        label: "{{ item.target }}"
+        label: "{{ item.machine }}:{{ item.target }}"
       register: stale_source_stats
       tags: [mounts]
 
     - name: Stat the stale host bind targets
       ansible.builtin.stat:
         path: "{{ item.target }}"
-      loop: >-
-        {{ ledger.machines | dict2items
-           | map(attribute='value.host_binds', default=[]) | flatten
-           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop: "{{ stale_host_binds }}"
       loop_control:
         extended: true
-        label: "{{ item.target }}"
+        label: "{{ item.machine }}:{{ item.target }}"
       register: stale_target_stats
       tags: [mounts]
 
@@ -447,13 +455,10 @@
           '{{ host_mounts[item.target].source }}'. Unmount it manually, then
           re-run. This playbook never unmounts mounts it cannot prove it
           created.
-      loop: >-
-        {{ ledger.machines | dict2items
-           | map(attribute='value.host_binds', default=[]) | flatten
-           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop: "{{ stale_host_binds }}"
       loop_control:
         extended: true
-        label: "{{ item.target }}"
+        label: "{{ item.machine }}:{{ item.target }}"
       when:
         - config.mode == 'bind'
         - item.target in host_mounts
@@ -464,32 +469,57 @@
         - not (bind_mounts_force_remount | default(false) | bool)
       tags: [mounts]
 
+    - name: Collect running machines holding proven-stale host binds
+      ansible.builtin.set_fact:
+        stale_needing_stop: "{{ stale_needing_stop | default([]) + [item.machine] }}"
+      loop: "{{ stale_host_binds }}"
+      loop_control:
+        extended: true
+        label: "{{ item.machine }}:{{ item.target }}"
+      when:
+        - config.mode == 'bind'
+        - item.target in host_mounts
+        - stale_source_stats.results[ansible_loop.index0].stat.exists
+        - stale_source_stats.results[ansible_loop.index0].stat.st_dev == stale_target_stats.results[ansible_loop.index0].stat.st_dev
+        - stale_source_stats.results[ansible_loop.index0].stat.st_ino == stale_target_stats.results[ansible_loop.index0].stat.st_ino
+        - smolvm_sections[item.machine].state == 'running'
+      tags: [mounts]
+
+    - name: ACTION REQUIRED stale mounts need a stopped machine
+      ansible.builtin.fail:
+        msg: >-
+          {{ stale_needing_stop | unique | length }} machine(s) are running with
+          stale mounts that cannot be replaced while running (libkrun pins the
+          old bind): {{ stale_needing_stop | unique | join(', ') }}. For each
+          machine listed, run: smolvm machine stop --name <machine-name>; then
+          re-run this playbook — the stale bind is remediated while the machine
+          is stopped. Nothing else was changed by this run.
+      when:
+        - config.mode == 'bind'
+        - stale_needing_stop | default([]) | length > 0
+      tags: [mounts]
+
     - name: Unmount stale host binds (ledger-managed, no longer in config)
       ansible.builtin.command: "umount {{ item.target | quote }}"
       become: true
-      loop: >-
-        {{ ledger.machines | dict2items
-           | map(attribute='value.host_binds', default=[]) | flatten
-           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop: "{{ stale_host_binds }}"
       loop_control:
-        label: "{{ item.target }}"
+        label: "{{ item.machine }}:{{ item.target }}"
       register: stale_host_umount
       changed_when: stale_host_umount.rc == 0
       when:
         - config.mode == 'bind'
         - item.target in host_mounts
+        - smolvm_sections[item.machine].state != 'running'
         - not ansible_check_mode
       tags: [mounts]
 
     - name: Prune empty stale share subdirectories
       ansible.builtin.command: "rmdir {{ (share_root_resolved ~ '/' ~ (item.target | basename)) | quote }}"
       become: true
-      loop: >-
-        {{ ledger.machines | dict2items
-           | map(attribute='value.host_binds', default=[]) | flatten
-           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop: "{{ stale_host_binds }}"
       loop_control:
-        label: "{{ item.target }}"
+        label: "{{ item.machine }}:{{ item.target }}"
       register: stale_prune
       failed_when: false
       changed_when: stale_prune.rc is defined and stale_prune.rc == 0
