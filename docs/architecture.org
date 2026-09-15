@@ -130,11 +130,16 @@ prompting. Guest management itself uses smolvm machine exec, which runs as
 the machine's configured user, so no host-side passwordless sudo is involved;
 host-side bind mounts use Ansible become with password sudo.
 ** Failure and corner cases
-*** Foreign mounts at wanted targets are remediated when proven, refused otherwise
+*** Stale mounts are remediated when proven, refused otherwise — on stopped machines
 A stale host or guest bind the ledger proves is playbook-owned is
-unmounted and re-created from the current configuration. An unproven bind
-fails the run with every affected host and guest path listed; re-running
-with -e bind_mounts_force_remount=true forces replacement.
+unmounted and re-created from the current configuration while the machine
+is stopped. A running machine halts the run with an ACTION REQUIRED
+message first: libkrun keeps host-side file descriptors open on the share
+bind for the lifetime of the VM, so the old bind cannot be unmounted and
+even -e bind_mounts_force_remount=true must wait for a stopped machine.
+An unproven bind fails the run with every affected host and guest path
+listed; re-running with -e bind_mounts_force_remount=true forces
+replacement once the machine is stopped.
 *** Stale binds are unmounted, pruned, and never force-deleted
 Guest binds are unmounted deep first; host bind targets are unmounted and
 removed only when empty.
@@ -146,10 +151,11 @@ wrong-source, or wrong-ro mount is never silently skipped.
 Source-path comparison is deliberately avoided because the kernel reports
 bind sources in normalized form that cannot be matched by string
 equality. Proven-stale binds are remediated as above; readonly drift is
-remounted in place. Rename convergence follows: a renamed share
+remounted in place, which needs no umount and works on running machines.
+Rename convergence follows the same stopped-machine rule: a renamed share
 subdirectory, or a changed share source for the same guest target, is
-unmounted and re-mounted from the new share path automatically.
-*** Nested guest targets mount shallow first and unmount deep first
+unmounted and re-mounted from the new share path on the next run after
+the machine stops.
 *** An unreadable ledger disables cleanup for that run
 *** Stopped versus running machines gate different phases
 Guest mount collection and guest binds require running machines. Volume

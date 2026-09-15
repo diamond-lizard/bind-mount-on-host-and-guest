@@ -500,6 +500,7 @@
       tags: [mounts]
 
     - name: Probe host bind identity (source vs share subdirectory)
+      become: true
       ansible.builtin.command:
         argv:
           - python3
@@ -529,19 +530,20 @@
                 sys.exit(0)
             rec_id = stat_id(recorded) if recorded else None
             ours = rec_id is not None and rec_id == tgt_id
+            if state == "running":
+                why = "proven ours by ledger" if ours else "not proven by the ledger"
+                print(f"ACTION REQUIRED: stale bind at {tgt} ({why}) cannot be replaced while machine {machine} is running: libkrun pins the old bind.", file=sys.stderr)
+                print(f"ACTION REQUIRED:   smolvm machine stop --name {machine}", file=sys.stderr)
+                print("ACTION REQUIRED: then re-run this playbook; the stale bind is remediated while the machine is stopped.", file=sys.stderr)
+                sys.exit(4)
             if ours or force == "true":
                 subprocess.run(["umount", tgt], check=True)
                 why = "proven ours by ledger" if ours else "forced by user"
                 print(f"REMEDIATED: stale bind at {tgt} unmounted ({why}); re-binding from {src}")
                 sys.exit(10)
             print(f"FOREIGN: {tgt} is bound from different content than {src}, and the ledger does not prove this bind is ours", file=sys.stderr)
-            print(f"FOREIGN: forcing will unmount and replace: host bind {tgt}", file=sys.stderr)
-            if state == "running":
-                print(f"FOREIGN:   plus guest bind {guest_target} (machine {machine} is running)", file=sys.stderr)
             print("FOREIGN: re-run with -e bind_mounts_force_remount=true to accept, or unmount manually:", file=sys.stderr)
             print(f"FOREIGN:   host: sudo umount {tgt}", file=sys.stderr)
-            if state == "running":
-                print(f"FOREIGN:   guest: smolvm machine exec --name {machine} -- umount {guest_target}", file=sys.stderr)
             sys.exit(3)
           - "{{ item.src }}"
           - "{{ share_root_resolved ~ '/' ~ item.name }}"
@@ -560,6 +562,16 @@
       failed_when: host_bind_probe.rc != 0 and host_bind_probe.rc != 10
       when: config.mode == 'bind'
       tags: [mounts, verify]
+    - name: Compute per-mount readonly drift
+      ansible.builtin.set_fact:
+        ro_drift: "{{ ro_drift | default({}) | combine({item.machine ~ ':' ~ item.name: (item.readonly != ('RO-STATE: ro' in host_bind_probe.results[ansible_loop.index0].stdout))}) }}"
+      loop: "{{ all_mounts }}"
+      loop_control:
+        extended: true
+        label: "{{ item.machine }}:{{ item.name }}"
+      when: config.mode == 'bind'
+      tags: [mounts]
+
     - name: Remount host binds whose readonly state drifted
       ansible.builtin.command: "mount -o remount,{{ 'ro' if item.readonly else 'rw' }},bind {{ (share_root_resolved ~ '/' ~ item.name) | quote }}"
       become: true
@@ -572,28 +584,7 @@
       when:
         - config.mode == 'bind'
         - host_bind_probe.results[ansible_loop.index0].rc == 0
-        - item.readonly != ('RO-STATE: ro' in host_bind_probe.results[ansible_loop.index0].stdout)
-        - not ansible_check_mode
-      tags: [mounts]
-
-    - name: Unmount guest binds whose source changed (running machines)
-      vars:
-        remediated_targets: >-
-          {{ host_bind_probe.results
-             | selectattr('stdout', 'search', 'REMEDIATED')
-             | map(attribute='item.target') | list }}
-      ansible.builtin.command:
-        argv: "{{ ['smolvm', 'machine', 'exec', '--name', item.machine, '--', 'umount', item.target] }}"
-      loop: "{{ all_mounts }}"
-      loop_control:
-        label: "{{ item.machine }}:{{ item.target }}"
-      register: guest_src_umount
-      changed_when: guest_src_umount.rc == 0
-      failed_when: false
-      when:
-        - config.mode == 'bind'
-        - item.target in remediated_targets
-        - smolvm_sections[item.machine].state == 'running'
+        - ro_drift[item.machine ~ ':' ~ item.name] | bool
         - not ansible_check_mode
       tags: [mounts]
 
@@ -1076,7 +1067,7 @@
       loop_control:
         label: "{{ item.item.machine }}:{{ item.item.target }}"
       register: guest_foreign_umount
-      changed_when: guest_foreign_umount.results[ansible_loop.index0].rc == 0
+      changed_when: guest_foreign_umount.rc == 0
       failed_when: false
       when:
         - item.rc is defined and item.rc == 3
