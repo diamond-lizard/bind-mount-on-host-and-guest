@@ -68,7 +68,10 @@ every login as a fallback.
 ** How to
 *** Add a volume
 Add a mount entry under the machine in vars.yml and run the default
-playbook. Whether the guest can stay running depends on the mode.
+playbook. Whether the guest can stay running depends on the mode. After a
+host reboot, run the playbook before starting a machine: a standalone
+start mounts nothing, because the guest scripts refuse to bind from empty
+share directories.
 **** Bind mode: the guest can stay running
 The new directory rides inside the existing share volume, so the run
 creates the share subdirectory, bind-mounts it on the host, creates the
@@ -87,26 +90,22 @@ The run unmounts everything the ledger proves it created: the host-side
 bind, the emptied share subdirectory, and the guest-side bind.
 **** Direct mode: the guest must be stopped; the volume itself is removed
 *** Change a volume
-Changing the target path or the share name converges automatically.
-Whether the guest can stay running depends on the mode.
+Changing the target path, the share name, the source directory, or the
+readonly setting converges automatically. Whether the guest can stay
+running depends on the mode.
 **** Bind mode: the guest can stay running; the old binds are replaced in place
+A source change is remediated live: the stale host bind is unmounted and
+re-bound from the new source, the guest bind is unmounted and re-mounted
+fresh, and a readonly flip is remounted in place. A rename converges the
+same way through the ledger-stale cleanup.
 **** Direct mode: the guest must be stopped for the volume re-creation
-**** Manual preparation for source and readonly changes
-Two kinds of change need a manual unmount first. Both apply when the
-share name stays the same; a mount whose share name also changes is torn
-down and rebuilt automatically instead.
-***** Changing the source directory while keeping the share name
-The identity check compares the configured source against what the share
-subdirectory is bound from, and the check fails with a foreign-mount
-message. Whether the target path also changes makes no difference: the
-failure keys on the source and the share name alone.
-***** Flipping readonly on an already-mounted pair is not applied automatically
-The new setting takes effect only when the pair is mounted fresh. The
-share name staying the same is what makes it an already-mounted pair.
-***** Recovering: unmount the old bind pair or stop the guest
-The host bind is unmounted on the host; the guest bind is unmounted
-through smolvm machine exec. Stopping the guest instead clears its binds
-at once. Then edit and re-run.
+A source or readonly change removes and re-adds the volume, so the
+stopped-machine rule for volume changes applies.
+**** When remediation is refused
+If the ledger cannot prove that an existing bind is playbook-owned, the
+run halts and names every affected host and guest path. Re-run with
+-e bind_mounts_force_remount=true to accept; forcing unmounts and
+replaces the listed mounts.
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and
@@ -260,6 +259,10 @@ Management operations require it to be root.
 *** Foreign state
 Any mount, volume, or file the ledger cannot prove the playbook created.
 Refused or ignored, never removed.
+*** Force remount
+Replacing a bind whose ownership the ledger cannot prove, authorized by
+re-running with -e bind_mounts_force_remount=true; the refusal message
+lists every affected mount before anything is forced.
 *** Guest bind: a bind mount from the share path to the target path
 *** Guest-side share path: share_target followed by the mount name
 *** Host bind: a bind mount from a source directory to its share subdirectory
@@ -279,9 +282,15 @@ the guest binds at every login through passwordless sudo.
 *** Volume: a host directory attached to a machine as its own virtiofs device
 ** Troubleshooting
 *** A missing vars.yml fails fast with copy instructions
-*** A target mounted with a different source needs manual resolution
-Unmount the foreign mount, or run the teardown tag for ledger-managed binds,
-then re-run the playbook.
+*** A target mounted with a different source is remediated or refused
+When the ledger proves the existing bind is ours, the run unmounts it and
+re-binds from the configured source, on the host and in the guest. When it
+cannot, the run halts and lists every affected host and guest path; re-run
+with -e bind_mounts_force_remount=true to accept, or unmount manually.
+*** After a host reboot a standalone start mounts nothing
+Host binds are runtime state and do not survive reboots, so the share
+subdirectories are empty and the guest scripts refuse to bind from them.
+Run the playbook: it re-creates the host binds and the guest mounts.
 *** Refused volume changes mean stop, then re-run
 The playbook never stops a machine with live sessions on its own. Re-run
 after stopping: the run attaches the volume, starts the machine, and
