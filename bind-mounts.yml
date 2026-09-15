@@ -306,9 +306,14 @@
           {%- set external = observed | rejectattr('target', 'in', desired_targets + stale_targets) | list -%}
           {%- set adds = [] -%}
           {%- for v in desired -%}
-          {%- if v.target not in observed_targets -%}
+          {%- set matching = observed | selectattr('target', 'eq', v.target) | first | default(none) -%}
+          {%- if matching is none -%}
           {%- set spec = '--volume=' ~ v.src ~ ':' ~ v.target ~ (':ro' if v.ro else '') -%}
           {%- set _ = adds.append(spec) -%}
+          {%- elif matching.src != v.src or matching.ro != v.ro -%}
+          {%- set spec = '--volume=' ~ v.src ~ ':' ~ v.target ~ (':ro' if v.ro else '') -%}
+          {%- set _ = adds.append(spec) -%}
+          {%- set _ = removes.append('--remove-volume=' ~ matching.src ~ ':' ~ matching.target) -%}
           {%- endif -%}
           {%- endfor -%}
           {%- set removes = [] -%}
