@@ -414,6 +414,32 @@
              | map('regex_replace', '^', share_root_resolved ~ '/') | list }}
       tags: [always]
 
+    - name: Stat the ledger-recorded sources of stale host binds
+      ansible.builtin.stat:
+        path: "{{ item.source }}"
+      loop: >-
+        {{ ledger.machines | dict2items
+           | map(attribute='value.host_binds', default=[]) | flatten
+           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop_control:
+        extended: true
+        label: "{{ item.target }}"
+      register: stale_source_stats
+      tags: [mounts]
+
+    - name: Stat the stale host bind targets
+      ansible.builtin.stat:
+        path: "{{ item.target }}"
+      loop: >-
+        {{ ledger.machines | dict2items
+           | map(attribute='value.host_binds', default=[]) | flatten
+           | rejectattr('target', 'in', expected_host_targets) | list }}
+      loop_control:
+        extended: true
+        label: "{{ item.target }}"
+      register: stale_target_stats
+      tags: [mounts]
+
     - name: Fail on ledger-stale host bind targets mounted with a foreign source
       ansible.builtin.fail:
         msg: >-
@@ -426,10 +452,16 @@
            | map(attribute='value.host_binds', default=[]) | flatten
            | rejectattr('target', 'in', expected_host_targets) | list }}
       loop_control:
+        extended: true
         label: "{{ item.target }}"
       when:
         - config.mode == 'bind'
         - item.target in host_mounts
+        - >-
+          not (stale_source_stats.results[ansible_loop.index0].stat.exists
+          and stale_source_stats.results[ansible_loop.index0].stat.st_dev == stale_target_stats.results[ansible_loop.index0].stat.st_dev
+          and stale_source_stats.results[ansible_loop.index0].stat.st_ino == stale_target_stats.results[ansible_loop.index0].stat.st_ino)
+        - not (bind_mounts_force_remount | default(false) | bool)
       tags: [mounts]
 
     - name: Unmount stale host binds (ledger-managed, no longer in config)
@@ -1104,7 +1136,9 @@
           {%- set out = [] -%}
           {%- for entry in (ledger.machines | default({})) | dict2items -%}
           {%- for b in entry.value.get('guest_binds', []) -%}
-          {%- if b.target not in current_targets -%}
+          {%- set wanted = all_mounts | selectattr('target', 'eq', b.target)
+              | map(attribute='share_path') | first | default(none) -%}
+          {%- if b.target not in current_targets or (wanted is not none and b.source != wanted) -%}
           {%- set _ = out.append({'machine': entry.key, 'target': b.target}) -%}
           {%- endif -%}
           {%- endfor -%}
