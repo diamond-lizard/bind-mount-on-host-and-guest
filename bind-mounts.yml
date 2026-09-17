@@ -448,6 +448,18 @@
       register: stale_target_stats
       tags: [mounts]
 
+    - name: TRAP dump stale stat shapes
+      ansible.builtin.debug:
+        msg:
+          - "src_exists={{ stale_source_stats.results[ansible_loop.index0].stat.exists }}"
+          - "src_keys={{ stale_source_stats.results[ansible_loop.index0].stat.keys() | list }}"
+          - "tgt_keys={{ stale_target_stats.results[ansible_loop.index0].stat.keys() | list }}"
+      loop: "{{ stale_host_binds }}"
+      loop_control:
+        extended: true
+        label: "{{ item.machine }}:{{ item.target }}"
+      tags: [mounts]
+
     - name: Fail on ledger-stale host bind targets mounted with a foreign source
       ansible.builtin.fail:
         msg: >-
@@ -464,8 +476,8 @@
         - item.target in host_mounts
         - >-
           not (stale_source_stats.results[ansible_loop.index0].stat.exists
-          and stale_source_stats.results[ansible_loop.index0].stat.st_dev == stale_target_stats.results[ansible_loop.index0].stat.st_dev
-          and stale_source_stats.results[ansible_loop.index0].stat.st_ino == stale_target_stats.results[ansible_loop.index0].stat.st_ino)
+          and stale_source_stats.results[ansible_loop.index0].stat.dev == stale_target_stats.results[ansible_loop.index0].stat.dev
+          and stale_source_stats.results[ansible_loop.index0].stat.inode == stale_target_stats.results[ansible_loop.index0].stat.inode)
         - not (bind_mounts_force_remount | default(false) | bool)
       tags: [mounts]
 
@@ -480,8 +492,8 @@
         - config.mode == 'bind'
         - item.target in host_mounts
         - stale_source_stats.results[ansible_loop.index0].stat.exists
-        - stale_source_stats.results[ansible_loop.index0].stat.st_dev == stale_target_stats.results[ansible_loop.index0].stat.st_dev
-        - stale_source_stats.results[ansible_loop.index0].stat.st_ino == stale_target_stats.results[ansible_loop.index0].stat.st_ino
+        - stale_source_stats.results[ansible_loop.index0].stat.dev == stale_target_stats.results[ansible_loop.index0].stat.dev
+        - stale_source_stats.results[ansible_loop.index0].stat.inode == stale_target_stats.results[ansible_loop.index0].stat.inode
         - smolvm_sections[item.machine].state == 'running'
       tags: [mounts]
 
