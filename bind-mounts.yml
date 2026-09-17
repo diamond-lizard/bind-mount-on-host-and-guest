@@ -482,18 +482,19 @@
         - stale_source_stats.results[ansible_loop.index0].stat.exists
         - stale_source_stats.results[ansible_loop.index0].stat.dev == stale_target_stats.results[ansible_loop.index0].stat.dev
         - stale_source_stats.results[ansible_loop.index0].stat.inode == stale_target_stats.results[ansible_loop.index0].stat.inode
-        - smolvm_sections[item.machine].state == 'running'
+        - smolvm_sections.get(item.machine, {}).get('state', 'stopped') == 'running'
       tags: [mounts]
 
     - name: ACTION REQUIRED stale mounts need a stopped machine
       ansible.builtin.fail:
         msg: >-
           {{ stale_needing_stop | unique | length }} machine(s) are running with
-          stale mounts that cannot be replaced while running (libkrun pins the
-          old bind): {{ stale_needing_stop | unique | join(', ') }}. For each
-          machine listed, run: smolvm machine stop --name <machine-name>; then
-          re-run this playbook — the stale bind is remediated while the machine
-          is stopped. Nothing else was changed by this run.
+          stale mounts that cannot be removed or replaced while running
+          (libkrun pins the old bind): {{ stale_needing_stop | unique | join(', ') }}.
+          For each machine listed, run: smolvm machine stop --name <machine-name>;
+          then re-run this playbook — the stale mount is cleaned up (or
+          remediated) while the machine is stopped. Nothing else was changed
+          by this run.
       when:
         - config.mode == 'bind'
         - stale_needing_stop | default([]) | length > 0
@@ -510,7 +511,7 @@
       when:
         - config.mode == 'bind'
         - item.target in host_mounts
-        - smolvm_sections[item.machine].state != 'running'
+        - smolvm_sections.get(item.machine, {}).get('state', 'stopped') != 'running'
         - not ansible_check_mode
       tags: [mounts]
 
