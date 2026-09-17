@@ -139,7 +139,12 @@ bind for the lifetime of the VM, so the old bind cannot be unmounted and
 even -e bind_mounts_force_remount=true must wait for a stopped machine.
 An unproven bind fails the run with every affected host and guest path
 listed; re-running with -e bind_mounts_force_remount=true forces
-replacement once the machine is stopped.
+replacement once the machine is stopped. Stacked binds at a share
+subdirectory are detected through the per-layer findmnt listing;
+remediation umounts top-down with an ownership check on every layer,
+hard-capped at 10 layers, and verify enforces exactly one layer after a
+successful run. A layer the playbook cannot prove it created is never
+removed, even with force.
 *** Stale binds are unmounted, pruned, and never force-deleted
 Ledger-stale host binds carry their owning machine. A proven-stale bind on
 a running machine is collected into the ACTION REQUIRED summary instead of

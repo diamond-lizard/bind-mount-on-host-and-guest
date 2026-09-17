@@ -7,7 +7,8 @@ mode the target's readonly state is also compared against the expectation.
 
 Usage: guest-verify-one.py bind <target> <expected-share-source> <readonly>
        guest-verify-one.py direct <target>
-Exit codes: 0 = verified; 1 = not mounted, wrong source, or wrong ro state.
+Exit codes: 0 = verified; 1 = not mounted, wrong source, wrong ro state, or
+stacked mounts (more than one layer at the target).
 """
 import os
 import subprocess
@@ -19,7 +20,8 @@ def is_mountpoint(path):
         ["findmnt", "-rn", "-o", "TARGET", "-M", path],
         capture_output=True, text=True,
     )
-    return probe.returncode == 0 and probe.stdout.strip() == path
+    # Stacked mounts print one line per layer; presence is decided by rc only.
+    return probe.returncode == 0
 
 
 def stat_id(path):
@@ -45,10 +47,17 @@ def main():
         opts = subprocess.run(
             ["findmnt", "-rn", "-o", "OPTIONS", "-M", target],
             capture_output=True, text=True,
-        ).stdout.strip()
+        ).stdout.splitlines()[0]
         ro_now = "ro" in opts.split(",")
         if (readonly == "true") != ro_now:
             print(f"verify FAIL (guest): {target} is {'read-only' if ro_now else 'read-write'} but config wants {'read-only' if readonly == 'true' else 'read-write'}", file=sys.stderr)
+            return 1
+        layers = [l for l in subprocess.run(
+            ["findmnt", "-rn", "-o", "TARGET", "-M", target],
+            capture_output=True, text=True,
+        ).stdout.splitlines() if l == target]
+        if len(layers) > 1:
+            print(f"verify FAIL (guest): {target} has {len(layers)} stacked mounts; expected 1", file=sys.stderr)
             return 1
     print(f"verify ok (guest): {target}")
     return 0

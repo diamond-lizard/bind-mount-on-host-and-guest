@@ -23,7 +23,8 @@ def is_mountpoint(path):
         ["findmnt", "-rn", "-o", "TARGET", "-M", path],
         capture_output=True, text=True,
     )
-    return probe.returncode == 0 and probe.stdout.strip() == path
+    # Stacked mounts print one line per layer; presence is decided by rc only.
+    return probe.returncode == 0
 
 
 def stat_id(path):
@@ -41,10 +42,12 @@ def main():
         if stat_id(target) == stat_id(share):
             if not os.listdir(share):
                 print(f"warning: {target} is mounted but {share} is empty; the host-side bind is probably missing", file=sys.stderr)
+            # Stack collapse on the host side is the probe's job; the helper
+            # only judges the top layer, which is the live view.
             opts = subprocess.run(
                 ["findmnt", "-rn", "-o", "OPTIONS", "-M", target],
                 capture_output=True, text=True,
-            ).stdout.strip()
+            ).stdout.splitlines()[0]
             ro_now = "ro" in opts.split(",")
             if (readonly == "true") != ro_now:
                 subprocess.run(

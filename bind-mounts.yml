@@ -547,34 +547,68 @@
             def findmnt(field):
                 return subprocess.run(["findmnt", "-rn", "-o", field, "-M", tgt],
                                       capture_output=True, text=True)
-            p = findmnt("TARGET")
-            if p.returncode != 0 or p.stdout.strip() != tgt:
+            def mount_lines():
+                p = findmnt("SOURCE")
+                return [] if p.returncode != 0 else p.stdout.splitlines()
+            def subpath(source):
+                return source[source.find('[')+1:-1] if '[' in source else source
+            def layer_removable(source):
+                sp = subpath(source)
+                return (sp.startswith('share/')
+                        or sp == subpath(src)
+                        or (recorded and sp == subpath(recorded))
+                        or (force == "true" and sp.startswith('home/cthulhu/')))
+            layers = mount_lines()
+            if not layers:
                 print("REMEDIATE: not mounted", file=sys.stderr)
                 sys.exit(10)
-            opts = findmnt("OPTIONS").stdout.strip()
+            print(f"LAYERS: {len(layers)}")
+            for l in layers:
+                print(f"LAYER-SRC: {l}")
+            opts = findmnt("OPTIONS").stdout.splitlines()[0]
             ro_now = "ro" in opts.split(",")
             print(f"RO-STATE: {'ro' if ro_now else 'rw'}")
             src_id, tgt_id = stat_id(src), stat_id(tgt)
-            if src_id is not None and src_id == tgt_id:
-                print(f"OK: {tgt} bound from {src}")
-                sys.exit(0)
+            matched = src_id is not None and src_id == tgt_id
             rec_id = stat_id(recorded) if recorded else None
             ours = rec_id is not None and rec_id == tgt_id
+            if matched and len(layers) == 1:
+                print(f"OK: {tgt} bound from {src}")
+                sys.exit(0)
+            if matched and len(layers) > 1 and state == "running":
+                print(f"STACK: {len(layers)} layers at {tgt}; content is correct; run will collapse the stack when the machine is stopped")
+                print(f"OK: {tgt} top layer bound from {src}")
+                sys.exit(0)
             if state == "running":
                 why = "proven ours by ledger" if ours else "not proven by the ledger"
                 print(f"ACTION REQUIRED: stale bind at {tgt} ({why}) cannot be replaced while machine {machine} is running: libkrun pins the old bind.", file=sys.stderr)
                 print(f"ACTION REQUIRED:   smolvm machine stop --name {machine}", file=sys.stderr)
                 print("ACTION REQUIRED: then re-run this playbook; the stale bind is remediated while the machine is stopped.", file=sys.stderr)
                 sys.exit(4)
-            if ours or force == "true":
+            if not (ours or force == "true"):
+                print(f"FOREIGN: {tgt} is bound from different content than {src}, and the ledger does not prove this bind is ours", file=sys.stderr)
+                for l in layers:
+                    print(f"FOREIGN:   layer: {l}", file=sys.stderr)
+                print("FOREIGN: re-run with -e bind_mounts_force_remount=true to accept, or unmount manually:", file=sys.stderr)
+                print(f"FOREIGN:   host: sudo umount {tgt}", file=sys.stderr)
+                sys.exit(3)
+            for _ in range(10):
+                layers = mount_lines()
+                if not layers:
+                    break
+                bad = [l for l in layers if not layer_removable(l)]
+                if bad:
+                    print(f"FOREIGN: refusing to unmount {tgt}: layers the playbook cannot prove it created:", file=sys.stderr)
+                    for l in bad:
+                        print(f"FOREIGN:   layer: {l}", file=sys.stderr)
+                    sys.exit(3)
                 subprocess.run(["umount", tgt], check=True)
-                why = "proven ours by ledger" if ours else "forced by user"
-                print(f"REMEDIATED: stale bind at {tgt} unmounted ({why}); re-binding from {src}")
-                sys.exit(10)
-            print(f"FOREIGN: {tgt} is bound from different content than {src}, and the ledger does not prove this bind is ours", file=sys.stderr)
-            print("FOREIGN: re-run with -e bind_mounts_force_remount=true to accept, or unmount manually:", file=sys.stderr)
-            print(f"FOREIGN:   host: sudo umount {tgt}", file=sys.stderr)
-            sys.exit(3)
+            if mount_lines():
+                print(f"FOREIGN: {tgt} still stacked after 10 umounts; aborting", file=sys.stderr)
+                sys.exit(3)
+            why = "collapsed stack" if matched else ("proven ours by ledger" if ours else "forced by user")
+            print(f"REMEDIATED: stale bind at {tgt} cleared ({why}); re-binding from {src}")
+            sys.exit(10)
           - "{{ item.src }}"
           - "{{ share_root_resolved ~ '/' ~ item.name }}"
           - "{{ (ledger.machines | default({})).get(item.machine, {}).get('host_binds', []) | selectattr('target', 'eq', share_root_resolved ~ '/' ~ item.name) | map(attribute='source') | first | default('') }}"
@@ -1229,7 +1263,8 @@
             src, tgt, readonly = sys.argv[1], sys.argv[2], sys.argv[3]
             p = subprocess.run(["findmnt", "-rn", "-o", "TARGET", "-M", tgt],
                                capture_output=True, text=True)
-            if p.returncode != 0 or p.stdout.strip() != tgt:
+            layers = [l for l in p.stdout.splitlines() if l == tgt]
+            if p.returncode != 0 or not layers:
                 print("verify FAIL (host): %s is not a mountpoint" % tgt, file=sys.stderr)
                 sys.exit(1)
             sa, sb = os.stat(src), os.stat(tgt)
@@ -1237,10 +1272,13 @@
                 print("verify FAIL (host): %s does not match %s (device:inode differ)" % (tgt, src), file=sys.stderr)
                 sys.exit(1)
             opts = subprocess.run(["findmnt", "-rn", "-o", "OPTIONS", "-M", tgt],
-                                  capture_output=True, text=True).stdout.strip()
+                                  capture_output=True, text=True).stdout.splitlines()[0]
             ro_now = "ro" in opts.split(",")
             if (readonly == "true") != ro_now:
                 print("verify FAIL (host): %s is %s but config wants %s" % (tgt, 'read-only' if ro_now else 'read-write', 'read-only' if readonly == 'true' else 'read-write'), file=sys.stderr)
+                sys.exit(1)
+            if len(layers) > 1:
+                print("verify FAIL (host): %s has %d stacked mounts; expected 1" % (tgt, len(layers)), file=sys.stderr)
                 sys.exit(1)
             print("verify ok (host): %s" % tgt)
           - "{{ item.src }}"

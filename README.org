@@ -101,6 +101,11 @@ message naming the machine; stop it and re-run, and the stale bind is
 unmounted and re-bound from the new source before the machine starts. A
 rename (the share name changes while the source and target stay)
 converges the same way through the ledger-stale cleanup, with the same
+stopped-machine rule. Stacked binds at a share subdirectory (left by an
+interrupted remediation or by manual stacking) are detected and collapsed
+on the next run while the machine is stopped, and verify requires exactly
+one layer after a successful run.
+converges the same way through the ledger-stale cleanup, with the same
 stopped-machine rule.
 **** Direct mode: the guest must be stopped for the volume re-creation
 A source or readonly change removes and re-adds the volume, so the
@@ -110,7 +115,9 @@ If the ledger cannot prove that an existing bind is playbook-owned, the
 run halts and names every affected host and guest path. Re-run with
 -e bind_mounts_force_remount=true to accept; forcing unmounts and
 replaces the listed mounts. Forcing also requires a stopped machine for
-the same libkrun reason.
+the same libkrun reason. Every stack layer is individually
+ownership-checked: layers the playbook cannot prove it created are never
+removed, even with force.
 example. Copy vars.yml.example to vars.yml and replace names, users, and
 directories with your own.
 
