@@ -1085,6 +1085,39 @@
         - not ansible_check_mode
       tags: [mounts, verify]
 
+    - name: Unmount stale guest binds (ledger-managed, no longer in config)
+      # Runs BEFORE the fresh-mount task: a renamed or re-sourced mount makes
+      # the ledger's old guest-bind entry stale, and the fresh bind created by
+      # the mount task must not be torn down again afterwards.
+      vars:
+        current_targets: "{{ all_mounts | map(attribute='target') | list }}"
+        stale_pairs: >-
+          {%- set out = [] -%}
+          {%- for entry in (ledger.machines | default({})) | dict2items -%}
+          {%- for b in entry.value.get('guest_binds', []) -%}
+          {%- set wanted = all_mounts | selectattr('target', 'eq', b.target)
+              | map(attribute='share_path') | first | default(none) -%}
+          {%- if b.target not in current_targets or (wanted is not none and b.source != wanted) -%}
+          {%- set _ = out.append({'machine': entry.key, 'target': b.target}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ out | sort(attribute='target') | reverse }}
+      ansible.builtin.command:
+        argv: "{{ ['smolvm', 'machine', 'exec', '--name', pairs_item.machine, '--', 'umount', pairs_item.target] }}"
+      loop: "{{ stale_pairs }}"
+      loop_control:
+        loop_var: pairs_item
+        label: "{{ pairs_item.machine }}:{{ pairs_item.target }}"
+      register: stale_guest_umount
+      failed_when: false
+      changed_when: stale_guest_umount.rc is defined and stale_guest_umount.rc == 0
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[pairs_item.machine].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts]
+
     - name: Ensure and mount guest bind mounts
       ansible.builtin.command:
         argv:
@@ -1167,39 +1200,6 @@
       when:
         - config.mode == 'bind'
         - smolvm_sections[item.machine].state == 'running'
-        - not ansible_check_mode
-      tags: [mounts]
-
-    - name: Unmount stale guest binds (ledger-managed, no longer in config)
-      # Runs BEFORE the fresh-mount task: a renamed or re-sourced mount makes
-      # the ledger's old guest-bind entry stale, and the fresh bind created by
-      # the mount task must not be torn down again afterwards.
-      vars:
-        current_targets: "{{ all_mounts | map(attribute='target') | list }}"
-        stale_pairs: >-
-          {%- set out = [] -%}
-          {%- for entry in (ledger.machines | default({})) | dict2items -%}
-          {%- for b in entry.value.get('guest_binds', []) -%}
-          {%- set wanted = all_mounts | selectattr('target', 'eq', b.target)
-              | map(attribute='share_path') | first | default(none) -%}
-          {%- if b.target not in current_targets or (wanted is not none and b.source != wanted) -%}
-          {%- set _ = out.append({'machine': entry.key, 'target': b.target}) -%}
-          {%- endif -%}
-          {%- endfor -%}
-          {%- endfor -%}
-          {{ out | sort(attribute='target') | reverse }}
-      ansible.builtin.command:
-        argv: "{{ ['smolvm', 'machine', 'exec', '--name', pairs_item.machine, '--', 'umount', pairs_item.target] }}"
-      loop: "{{ stale_pairs }}"
-      loop_control:
-        loop_var: pairs_item
-        label: "{{ pairs_item.machine }}:{{ pairs_item.target }}"
-      register: stale_guest_umount
-      failed_when: false
-      changed_when: stale_guest_umount.rc is defined and stale_guest_umount.rc == 0
-      when:
-        - config.mode == 'bind'
-        - smolvm_sections[pairs_item.machine].state == 'running'
         - not ansible_check_mode
       tags: [mounts]
 
