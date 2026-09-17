@@ -551,7 +551,7 @@
                 p = findmnt("SOURCE")
                 return [] if p.returncode != 0 else p.stdout.splitlines()
             def subpath(source):
-                return source[source.find('[')+1:-1] if '[' in source else source
+                return source[source.find('[')+1:-1].lstrip('/') if '[' in source else source.lstrip('/')
             def layer_removable(source):
                 sp = subpath(source)
                 return (sp.startswith('share/')
