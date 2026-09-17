@@ -448,18 +448,6 @@
       register: stale_target_stats
       tags: [mounts]
 
-    - name: TRAP dump stale stat shapes
-      ansible.builtin.debug:
-        msg:
-          - "src_exists={{ stale_source_stats.results[ansible_loop.index0].stat.exists }}"
-          - "src_keys={{ stale_source_stats.results[ansible_loop.index0].stat.keys() | list }}"
-          - "tgt_keys={{ stale_target_stats.results[ansible_loop.index0].stat.keys() | list }}"
-      loop: "{{ stale_host_binds }}"
-      loop_control:
-        extended: true
-        label: "{{ item.machine }}:{{ item.target }}"
-      tags: [mounts]
-
     - name: Fail on ledger-stale host bind targets mounted with a foreign source
       ansible.builtin.fail:
         msg: >-
