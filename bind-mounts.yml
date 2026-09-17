@@ -1170,23 +1170,10 @@
         - not ansible_check_mode
       tags: [mounts]
 
-    - name: Fail with guidance when a machine is stopped but mounts were requested
-      ansible.builtin.fail:
-        msg: >-
-          Machine '{{ m.name }}' is stopped; guest bind mounts need a running
-          machine. Run: ansible-playbook bind-mounts.yml --tags start -K, then
-          re-run this playbook.
-      loop: "{{ normalized }}"
-      loop_control:
-        loop_var: m
-        label: "{{ m.name }}"
-      when:
-        - config.mode == 'bind'
-        - m.mounts | length > 0
-        - smolvm_sections[m.name].state != 'running'
-      tags: [mounts]
-
     - name: Unmount stale guest binds (ledger-managed, no longer in config)
+      # Runs BEFORE the fresh-mount task: a renamed or re-sourced mount makes
+      # the ledger's old guest-bind entry stale, and the fresh bind created by
+      # the mount task must not be torn down again afterwards.
       vars:
         current_targets: "{{ all_mounts | map(attribute='target') | list }}"
         stale_pairs: >-
@@ -1214,6 +1201,22 @@
         - config.mode == 'bind'
         - smolvm_sections[pairs_item.machine].state == 'running'
         - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Fail with guidance when a machine is stopped but mounts were requested
+      ansible.builtin.fail:
+        msg: >-
+          Machine '{{ m.name }}' is stopped; guest bind mounts need a running
+          machine. Run: ansible-playbook bind-mounts.yml --tags start -K, then
+          re-run this playbook.
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when:
+        - config.mode == 'bind'
+        - m.mounts | length > 0
+        - smolvm_sections[m.name].state != 'running'
       tags: [mounts]
 
     - name: Note that bind mode is inactive (direct mode)
