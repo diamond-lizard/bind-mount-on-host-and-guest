@@ -105,8 +105,6 @@ stopped-machine rule. Stacked binds at a share subdirectory (left by an
 interrupted remediation or by manual stacking) are detected and collapsed
 on the next run while the machine is stopped, and verify requires exactly
 one layer after a successful run.
-converges the same way through the ledger-stale cleanup, with the same
-stopped-machine rule.
 **** Direct mode: the guest must be stopped for the volume re-creation
 A source or readonly change removes and re-adds the volume, so the
 stopped-machine rule for volume changes applies.
@@ -118,6 +116,8 @@ replaces the listed mounts. Forcing also requires a stopped machine for
 the same libkrun reason. Every stack layer is individually
 ownership-checked: layers the playbook cannot prove it created are never
 removed, even with force.
+** Configuration reference
+The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and
 directories with your own.
 
