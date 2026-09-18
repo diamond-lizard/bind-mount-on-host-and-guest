@@ -1161,6 +1161,8 @@
       loop_control:
         label: "{{ item.machine }}:{{ item.target }}"
       register: guest_mount_result
+      changed_when: >-
+        'mounted:' in guest_mount_result.stdout or 'remounted:' in guest_mount_result.stdout
       failed_when: false
       when:
         - config.mode == 'bind'
