@@ -850,6 +850,50 @@
         - not ansible_check_mode
       tags: [install]
 
+    - name: Probe the guest user and home directory
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - sh
+          - -c
+          - 'id -u "$1" >/dev/null && test -d "$2" && echo HOME-OK'
+          - sh
+          - "{{ m.user }}"
+          - "{{ m.profile_path | dirname }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: guest_user_probe
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      when:
+        - config.mode == 'bind'
+        - smolvm_sections[m.name].state == 'running'
+      tags: [install]
+
+    - name: Fail when the guest user or home directory is missing
+      ansible.builtin.fail:
+        msg: >-
+          Machine '{{ item.item.name }}' has no user '{{ item.item.user }}' or
+          no home directory '{{ item.item.profile_path | dirname }}' inside the
+          guest, so the login hook cannot be installed. Create them, e.g.:
+          smolvm machine exec --name {{ item.item.name }} -- sh -c "useradd -m
+          -u {{ item.item.uid }} {{ item.item.user }}" (adjust to your guest's
+          user tooling), or set profile_path in vars.yml to an existing
+          directory. Then re-run this playbook.
+      loop: "{{ guest_user_probe.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.rc is defined and (item.rc != 0 or 'HOME-OK' not in item.stdout)
+      tags: [install]
+
     - name: Fail when the smolvm exec user is not root
       ansible.builtin.fail:
         msg: >-
