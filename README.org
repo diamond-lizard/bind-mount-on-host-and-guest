@@ -89,6 +89,11 @@ mode. Whether the guest can stay running depends on the mode.
 The run unmounts everything the ledger proves it created: the host-side
 bind, the emptied share subdirectory, and the guest-side bind.
 **** Direct mode: the guest must be stopped; the volume itself is removed
+*** Manage a subset of machines
+Every run accepts -e limit_machines=name1[,name2...] to scope it to the
+named machines only: stop, start, attach, teardown, and the default run
+all respect it. Unknown names fail the run. Machines outside the scope
+are untouched, and their ledger entries are carried forward unchanged.
 *** Change a volume
 Changing the target path, the share name, the source directory, or the
 readonly setting converges automatically. Whether the guest can stay

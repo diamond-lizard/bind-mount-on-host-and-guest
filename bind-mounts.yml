@@ -6,6 +6,7 @@
 #   ansible-playbook bind-mounts.yml -i inventory --tags attach -K   (volume convergence)
 #   ansible-playbook bind-mounts.yml -i inventory --tags stop -K     (graceful stop)
 #   ansible-playbook bind-mounts.yml -i inventory --tags teardown -K (undo playbook-created state)
+# Add -e limit_machines=name1[,name2...] to scope any run to those machines only.
 - name: Manage smolvm share bind mounts (host and guests)
   hosts: localhost
   connection: local
@@ -59,6 +60,29 @@
           paths without whitespace.
       tags: [always]
 
+    - name: Normalize limit_machines
+      ansible.builtin.set_fact:
+        limit_parts: "{{ limit_machines | default('') | string | split(',') | map('trim') | reject('equalto', '') | list }}"
+      tags: [always]
+
+    - name: Fail when limit_machines names an unknown machine
+      ansible.builtin.assert:
+        that:
+          - limit_parts | difference(config.machines | map(attribute='name') | list) | length == 0
+        msg: >-
+          limit_machines contains a machine name that is not in vars.yml.
+          Configured machines: {{ config.machines | map(attribute='name') | list | join(', ') }}.
+      tags: [always]
+
+    - name: Apply machine scoping (limit_machines)
+      ansible.builtin.set_fact:
+        config_machines: >-
+          {{ config.machines
+             | selectattr('name', 'in', limit_parts)
+             | list if limit_parts | length > 0
+             else config.machines }}
+      tags: [always]
+
     - name: Resolve the share root to its canonical host path
       ansible.builtin.set_fact:
         share_root_resolved: "{{ config.share_root | realpath }}"
@@ -68,7 +92,7 @@
       ansible.builtin.set_fact:
         normalized: >-
           {%- set out = [] -%}
-          {%- for m in config.machines -%}
+          {%- for m in config_machines -%}
           {%- set mounts = [] -%}
           {%- for mnt in m.mounts | default([]) -%}
           {%- set share_name = mnt.name | default(mnt.src | basename) -%}
@@ -420,7 +444,7 @@
           {%- set out = [] -%}
           {%- for e in (ledger.machines | default({})) | dict2items -%}
           {%- for b in e.value.get('host_binds', []) -%}
-          {%- if b.target not in expected_host_targets -%}
+          {%- if b.target not in expected_host_targets and e.key in (normalized | map(attribute='name') | list) -%}
           {%- set _ = out.append(b | combine({'machine': e.key})) -%}
           {%- endif -%}
           {%- endfor -%}
@@ -1167,7 +1191,7 @@
           {%- for b in entry.value.get('guest_binds', []) -%}
           {%- set wanted = all_mounts | selectattr('target', 'eq', b.target)
               | map(attribute='share_path') | first | default(none) -%}
-          {%- if b.target not in current_targets or (wanted is not none and b.source != wanted) -%}
+          {%- if (b.target not in current_targets or (wanted is not none and b.source != wanted)) and entry.key in (normalized | map(attribute='name') | list) -%}
           {%- set _ = out.append({'machine': entry.key, 'target': b.target}) -%}
           {%- endif -%}
           {%- endfor -%}
@@ -1409,6 +1433,11 @@
       ansible.builtin.set_fact:
         ledger_new: >-
           {%- set machines_out = {} -%}
+          {%- for e in (ledger.machines | default({})) | dict2items -%}
+          {%- if e.key not in (normalized | map(attribute='name') | list) -%}
+          {%- set _ = machines_out.update({e.key: e.value}) -%}
+          {%- endif -%}
+          {%- endfor -%}
           {%- for m in normalized -%}
           {%- set mounts = all_mounts | selectattr('machine', 'eq', m.name) | list -%}
           {%- set host_binds = [] -%}

@@ -8,7 +8,10 @@ vars.yml.example.
 bind-mounts.yml validates the configuration, gathers real state from findmnt
 and smolvm machine ls, plans a volume diff, converges stopped machines,
 halts before any mutation when a running machine needs volume changes,
-applies the rest, verifies the result, and rewrites the ledger.
+applies the rest, verifies the result, and rewrites the ledger. Every run
+accepts -e limit_machines=name1[,name2...] to scope it to the named
+machines only; ledger entries of scoped-out machines are carried forward
+unchanged.
 *** The filter plugin
 filter_plugins/smolvm_facts.py parses smolvm machine ls --verbose into
 per-machine state and volume lists. The format was verified against real
