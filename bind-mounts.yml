@@ -883,7 +883,7 @@
           {{ guest_user_probe.results
              | selectattr('stdout', 'defined')
              | selectattr('stdout', 'search', 'HOME-MISSING')
-             | map(attribute='item.m.name') | unique | list }}
+             | map(attribute='m.name') | unique | list }}
       ansible.builtin.fail:
         msg: >-
           {{ missing_machines | length }} machine(s) have no user or no home
