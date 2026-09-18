@@ -881,16 +881,16 @@
     - name: Fail when the guest user or home directory is missing
       ansible.builtin.fail:
         msg: >-
-          Machine '{{ item.item.name }}' has no user '{{ item.item.user }}' or
-          no home directory '{{ item.item.profile_path | dirname }}' inside the
+          Machine '{{ item.m.name }}' has no user '{{ item.m.user }}' or
+          no home directory '{{ item.m.profile_path | dirname }}' inside the
           guest, so the login hook cannot be installed. Create them, e.g.:
-          smolvm machine exec --name {{ item.item.name }} -- sh -c "useradd -m
-          -u {{ item.item.uid }} {{ item.item.user }}" (adjust to your guest's
+          smolvm machine exec --name {{ item.m.name }} -- sh -c "useradd -m
+          -u {{ item.m.uid }} {{ item.m.user }}" (adjust to your guest's
           user tooling), or set profile_path in vars.yml to an existing
           directory. Then re-run this playbook.
       loop: "{{ guest_user_probe.results }}"
       loop_control:
-        label: "{{ item.item.name }}"
+        label: "{{ item.m.name }}"
       when: item.rc is defined and (item.rc != 0 or 'HOME-OK' not in item.stdout)
       tags: [install]
 
