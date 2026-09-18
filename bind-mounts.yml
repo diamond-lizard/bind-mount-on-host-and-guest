@@ -878,19 +878,23 @@
       tags: [install]
 
     - name: Fail when the guest user or home directory is missing
+      vars:
+        missing_machines: >-
+          {{ guest_user_probe.results
+             | selectattr('stdout', 'defined')
+             | selectattr('stdout', 'search', 'HOME-MISSING')
+             | map(attribute='item.m.name') | unique | list }}
       ansible.builtin.fail:
         msg: >-
-          Machine '{{ item.m.name }}' has no user '{{ item.m.user }}' or
-          no home directory '{{ item.m.profile_path | dirname }}' inside the
-          guest, so the login hook cannot be installed. Create them, e.g.:
-          smolvm machine exec --name {{ item.m.name }} -- sh -c "useradd -m
-          -u {{ item.m.uid }} {{ item.m.user }}" (adjust to your guest's
-          user tooling), or set profile_path in vars.yml to an existing
-          directory. Then re-run this playbook.
-      loop: "{{ guest_user_probe.results }}"
-      loop_control:
-        label: "{{ item.m.name }}"
-      when: item.stdout is defined and 'HOME-MISSING' in item.stdout
+          {{ missing_machines | length }} machine(s) have no user or no home
+          directory for the configured profile_path inside the guest, so the
+          login hook cannot be installed: {{ missing_machines | join(', ') }}.
+          For each machine listed, create the user and home directory, e.g.:
+          smolvm machine exec --name <machine-name> -- sh -c "useradd -m -u
+          <uid> <user>" (adjust to your guest's user tooling), or set
+          profile_path in vars.yml to an existing directory. Then re-run this
+          playbook. Nothing else was changed by this run.
+      when: missing_machines | length > 0
       tags: [install]
 
     - name: Fail when the smolvm exec user is not root
