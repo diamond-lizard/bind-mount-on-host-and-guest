@@ -571,7 +571,7 @@
       when:
         - config.mode == 'bind'
         - item.target not in host_mounts
-        - item.machine in (normalized | map(attribute='name') | list)
+        - item.machine in (normalized | map(attribute='name') | list) or item.machine not in smolvm_sections
         - not ansible_check_mode
       tags: [mounts]
 
