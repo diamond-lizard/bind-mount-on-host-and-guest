@@ -174,6 +174,11 @@ changes require stopped machines: the default run converges stopped
 machines by itself and halts with an ACTION REQUIRED message when a
 running machine needs volume changes; the attach tag refuses them.
 *** Non-root exec user fails the install phase
+*** Missing guest user or home directory fails the install phase
+The install preflight checks that the configured user exists inside the
+guest and that the profile directory is present; either missing fails the
+run with plain guidance (create the user and home, or point profile_path
+at an existing directory) instead of a helper traceback.
 *** Exceeded volume budget fails with counts and the issue link
 *** Missing or non-directory sources fail before any mutation
 *** Corrupt sudoers content is rejected before activation

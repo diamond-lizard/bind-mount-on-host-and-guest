@@ -176,8 +176,10 @@ ACTION REQUIRED message naming the machine and the command to run.
 Host binds and guest binds only. Refuses stopped machines, because guest
 binds need a running guest.
 *** install
-Refreshes the guest script, the sudoers drop-in, and the profile hook. Needs
-running machines and a root exec user.
+Preflights the guest user and home directory, then refreshes the guest
+script, the sudoers drop-in, and the profile hook. Needs running machines,
+a root exec user, and the configured user with an existing home directory
+inside the guest.
 *** start starts stopped machines and waits for exec readiness
 *** verify checks every mount read-only after the run
 *** attach converges the volume set; machines must be stopped
@@ -332,3 +334,16 @@ with the machine's uid in the message.
 **** Solution
 Create or update the machine without a non-root --user default, then
 re-run the playbook.
+*** The guest user or home directory is missing
+**** Context
+Installing the login hook needs the machine's configured user to exist
+inside the guest, with a home directory for the managed .bash_profile
+block.
+**** Cause
+The machine was created without the user (or without a home directory
+for it), so the preflight finds neither and refuses to continue.
+**** Solution
+Create the user and home directory inside the guest, e.g.: smolvm
+machine exec --name <machine-name> -- sh -c "useradd -m -u <uid>
+<user>" (adjust to your guest's user tooling), or set profile_path in
+vars.yml to an existing directory, then re-run the playbook.
