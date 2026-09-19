@@ -509,6 +509,23 @@
         - smolvm_sections.get(item.machine, {}).get('state', 'stopped') == 'running'
       tags: [mounts]
 
+    - name: Note out-of-scope stale mounts left untouched
+      vars:
+        stale_out_of_scope: >-
+          {{ stale_host_binds
+             | rejectattr('machine', 'in', normalized | map(attribute='name') | list)
+             | map(attribute='machine') | unique | list }}
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: limit_machines is active, and the ledger holds stale host
+          binds for machines outside the scope: {{ stale_out_of_scope | join(', ') }}.
+          They are left untouched this run; run the playbook without
+          limit_machines (after stopping those machines) to clean them up.
+      when:
+        - config.mode == 'bind'
+        - stale_out_of_scope | default([]) | length > 0
+      tags: [mounts]
+
     - name: ACTION REQUIRED stale mounts need a stopped machine
       ansible.builtin.fail:
         msg: >-
