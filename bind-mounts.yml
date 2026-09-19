@@ -1317,6 +1317,42 @@
         - not ansible_check_mode
       tags: [mounts]
 
+    - name: Collect guest binds the helper could not converge
+      ansible.builtin.set_fact:
+        guest_mount_failed: >-
+          {%- set out = [] -%}
+          {%- for r in guest_mount_result.results | default([]) -%}
+          {%- if r.rc is defined and r.rc not in [0, 3] -%}
+          {%- set _ = out.append(r.item.machine ~ ': ' ~ r.item.target ~ ' (helper rc ' ~ r.rc ~ ': ' ~ (r.stderr | default('') | trim | replace('\n', ' ') | truncate(140, True, '...')) ~ ')') -%}
+          {%- elif r.rc is defined and r.rc == 0 and 'is mounted but' in (r.stderr | default('')) -%}
+          {%- set _ = out.append(r.item.machine ~ ': ' ~ r.item.target ~ ' (mounted, but the share subdirectory is empty)') -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+      tags: [mounts]
+
+    - name: >-
+        ACTION REQUIRED: guest bind mount(s) could not be converged
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['=' * 70,
+              '%-70s' | format('  Guest bind mount(s) the helper could not converge:')]
+             + guest_mount_failed
+             + ['%-70s' | format('  rc 4 means the share source was empty: the host-side bind is'),
+                '%-70s' | format('  missing (typically after a host reboot - run the playbook on'),
+                '%-70s' | format('  the host first), or the configured source directory is empty.'),
+                '%-70s' | format('  Other rc values are helper errors; their stderr is above.'),
+                '%-70s' | format('  Nothing else was changed by this run.'),
+                '=' * 70] }}
+      when: guest_mount_failed | default([]) | length > 0
+      tags: [mounts]
+
+    - name: Stop because a guest bind mount could not be converged
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: guest bind mount(s) failed to converge; see the box above."
+      when: guest_mount_failed | default([]) | length > 0
+      tags: [mounts]
+
     - name: Fail on foreign guest mounts the ledger cannot prove
       ansible.builtin.fail:
         msg: >-
