@@ -485,7 +485,7 @@
         label: "{{ item.machine }}:{{ item.target }}"
       when:
         - config.mode == 'bind'
-        - item.machine in (normalized | map(attribute='name') | list)
+        - item.machine in (normalized | map(attribute='name') | list) or item.machine not in smolvm_sections
         - item.target in host_mounts
         - >-
           not (stale_source_stats.results[ansible_loop.index0].stat.exists
