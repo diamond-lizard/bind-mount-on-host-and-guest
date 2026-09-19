@@ -1639,19 +1639,34 @@
     # ================================================================
     # 12. Teardown (--tags teardown)
     # ================================================================
-    - name: Refuse direct-mode volume removal on running machines
+    - name: Collect machines that are running (teardown needs stopped machines)
+      vars:
+        running_names: >-
+          {{ smolvm_sections | dict2items | selectattr('value.state', 'eq', 'running') | map(attribute='key') | list }}
+      ansible.builtin.set_fact:
+        teardown_running: "{{ normalized | map(attribute='name') | select('in', running_names) | list }}"
+      tags: [teardown, never]
+
+    - name: >-
+        ACTION REQUIRED: teardown needs stopped machines
+      ansible.builtin.debug:
+        msg:
+          - "{{ '=' * 70 }}"
+          - "{{ '%-70s' | format('  Teardown needs stopped machines:') }}"
+          - "{{ '%-70s' | format(('    ' ~ (teardown_running | join(', ')))[:70]) }}"
+          - "{{ '%-70s' | format('  A running machine pins its host binds (libkrun) and refuses') }}"
+          - "{{ '%-70s' | format('  volume removal, so both halves of teardown need it stopped.') }}"
+          - "{{ '%-70s' | format('  Run: ansible-playbook bind-mounts.yml --tags stop -K') }}"
+          - "{{ '%-70s' | format('  then: ansible-playbook bind-mounts.yml --tags teardown -K') }}"
+          - "{{ '%-70s' | format('  Nothing else was changed by this run.') }}"
+          - "{{ '=' * 70 }}"
+      when: teardown_running | default([]) | length > 0
+      tags: [teardown, never]
+
+    - name: Stop because teardown needs stopped machines
       ansible.builtin.fail:
-        msg: >-
-          Machine '{{ m.name }}' is running; removing its volumes requires a
-          stopped machine. Run: ansible-playbook bind-mounts.yml --tags stop
-          -K, then --tags teardown.
-      loop: "{{ normalized }}"
-      loop_control:
-        loop_var: m
-        label: "{{ m.name }}"
-      when:
-        - config.mode == 'direct'
-        - smolvm_sections[m.name].state == 'running'
+        msg: "ACTION REQUIRED: stop the machine(s) listed in the box above, then re-run --tags teardown."
+      when: teardown_running | default([]) | length > 0
       tags: [teardown, never]
 
     - name: Copy the profile helper for teardown
@@ -1827,6 +1842,48 @@
         - not ansible_check_mode
       tags: [teardown, never]
 
+    - name: Collect guest-side artifacts teardown could not remove
+      vars:
+        pending: >-
+          {%- set out = [] -%}
+          {%- for m in normalized -%}
+          {%- if smolvm_sections[m.name].state != 'running' -%}
+          {%- set e = (ledger.machines | default({})).get(m.name, {}).get('installed', {}) -%}
+          {%- set what = [] -%}
+          {%- if e.get('script', false) -%}{%- set _ = what.append('installed script') -%}{%- endif -%}
+          {%- if e.get('sudoers', false) -%}{%- set _ = what.append('sudoers drop-in') -%}{%- endif -%}
+          {%- if e.get('bash_profile_block', false) -%}{%- set _ = what.append('profile block') -%}{%- endif -%}
+          {%- if what -%}
+          {%- set _ = out.append('%-70s' | format(('    ' ~ m.name ~ ': ' ~ (what | join(', ')))[:70])) -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+      ansible.builtin.set_fact:
+        teardown_pending_artifacts: "{{ pending }}"
+      tags: [teardown, never]
+
+    - name: >-
+        ACTION REQUIRED: teardown left guest-side artifacts behind
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['=' * 70,
+              '%-70s' | format('  Stopped machine(s) still carrying guest-side artifacts:')]
+             + teardown_pending_artifacts
+             + ['%-70s' | format('  Those removals need a running machine. Switch the machine to'),
+                '%-70s' | format('  direct mode and run the default playbook: the converging run'),
+                '%-70s' | format('  removes the bind-mode hook, sudoers rule and script. Then'),
+                '%-70s' | format('  re-run --tags teardown for the host-side residue.'),
+                '%-70s' | format('  Nothing else was changed by this run.'),
+                '=' * 70] }}
+      when: teardown_pending_artifacts | default([]) | length > 0
+      tags: [teardown, never]
+
+    - name: Stop because teardown could not remove guest-side artifacts
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: guest-side artifacts remain on stopped machine(s); see the box above."
+      when: teardown_pending_artifacts | default([]) | length > 0
+      tags: [teardown, never]
     - name: Prune the ledger entries of machines torn down by this run
       vars:
         ledger_remaining: >-
