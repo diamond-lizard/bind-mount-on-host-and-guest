@@ -1109,7 +1109,7 @@
           # Managed by bind-mounts.yml (ansible). DO NOT EDIT; overwritten on re-run.
           # Allows the primary guest user to trigger the bind-mount script.
           {{ m.user }} ALL=(root) NOPASSWD: {{ installed_script_guest_path }}
-        dest: "/tmp/010-bind-mounts"
+        dest: "/tmp/bind-mounts-{{ m.name }}.sudoers"
         mode: "0600"
       loop: "{{ normalized }}"
       loop_control:
@@ -1119,7 +1119,7 @@
       tags: [install]
 
     - name: Copy the sudoers drop-in into each machine
-      ansible.builtin.command: "smolvm machine cp /tmp/010-bind-mounts {{ m.name }}:/tmp/010-bind-mounts"
+      ansible.builtin.command: "smolvm machine cp /tmp/bind-mounts-{{ m.name }}.sudoers {{ m.name }}:/tmp/010-bind-mounts"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -1188,6 +1188,7 @@
         temp_paths: >-
           {%- set paths = ['/tmp/010-bind-mounts'] -%}
           {%- for m in normalized -%}
+          {%- set _ = paths.append('/tmp/bind-mounts-' ~ m.name ~ '.sudoers') -%}
           {%- set _ = paths.append('/tmp/bind-mount-on-guest-' ~ m.name ~ '.sh') -%}
           {%- endfor -%}
           {{ paths }}
