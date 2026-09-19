@@ -1454,7 +1454,7 @@
       ansible.builtin.set_fact:
         ledger_new: >-
           {%- set machines_out = {} -%}
-          {%- set stale_machines = stale_host_binds | map(attribute='machine') | unique | list -%}
+          {%- set stale_machines = (stale_host_binds | default([])) | map(attribute='machine') | unique | list -%}
           {%- for e in (ledger.machines | default({})) | dict2items -%}
           {%- if e.key not in (normalized | map(attribute='name') | list) and e.key not in stale_machines -%}
           {%- set _ = machines_out.update({e.key: e.value}) -%}
