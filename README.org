@@ -11,8 +11,12 @@ mounts, verifies every mount, and records everything it created in a
 provenance ledger.
 
 The playbook manages any number of machines and users from the same
-file, is safe to re-run in any state, and never touches a mount or
-volume it cannot prove it created.
+file, is safe to re-run in any state reachable through normal playbook
+operation, and never touches a mount or volume it cannot prove it
+created. Unusual states are refused, not auto-fixed: a mount whose
+content does not match the configuration, or stack layers whose
+ownership the ledger cannot prove, halt the run with instructions
+instead of being modified.
 
 Two modes are supported. In bind mode the playbook consolidates every
 configured directory under one share directory (share_root), attaches that
