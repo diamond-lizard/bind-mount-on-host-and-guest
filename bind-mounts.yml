@@ -830,17 +830,24 @@
     # 6. Volume convergence (--tags attach; stopped machines only)
     # ================================================================
 
-    - name: Refuse volume changes on running machines
-      ansible.builtin.fail:
-        msg: >-
-          Machine '{{ m.name }}' is running; volume changes need a stopped
-          machine. Run: ansible-playbook bind-mounts.yml --tags stop -K, then
-          --tags attach, then --tags start.
+    - name: Collect running machines (volume changes need a stopped machine)
+      ansible.builtin.set_fact:
+        volume_running: "{{ volume_running | default([]) + [m.name] }}"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
         label: "{{ m.name }}"
       when: smolvm_sections[m.name].state == 'running'
+      tags: [attach, never]
+
+    - name: Refuse volume changes on running machines
+      ansible.builtin.fail:
+        msg: >-
+          {{ volume_running | length }} machine(s) are running, and volume changes
+          need a stopped machine: {{ volume_running | join(', ') }}.
+          Run: ansible-playbook bind-mounts.yml --tags stop -K, then
+          --tags attach, then --tags start.
+      when: volume_running | default([]) | length > 0
       tags: [attach, never]
 
     - name: Enforce the per-machine volume budget
