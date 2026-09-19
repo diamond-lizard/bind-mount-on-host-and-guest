@@ -444,7 +444,7 @@
           {%- set out = [] -%}
           {%- for e in (ledger.machines | default({})) | dict2items -%}
           {%- for b in e.value.get('host_binds', []) -%}
-          {%- if b.target not in expected_host_targets and e.key in (normalized | map(attribute='name') | list) -%}
+          {%- if b.target not in expected_host_targets -%}
           {%- set _ = out.append(b | combine({'machine': e.key})) -%}
           {%- endif -%}
           {%- endfor -%}
@@ -485,6 +485,7 @@
         label: "{{ item.machine }}:{{ item.target }}"
       when:
         - config.mode == 'bind'
+        - item.machine in (normalized | map(attribute='name') | list)
         - item.target in host_mounts
         - >-
           not (stale_source_stats.results[ansible_loop.index0].stat.exists
@@ -502,6 +503,7 @@
         label: "{{ item.machine }}:{{ item.target }}"
       when:
         - config.mode == 'bind'
+        - item.machine in (normalized | map(attribute='name') | list)
         - item.target in host_mounts
         - stale_source_stats.results[ansible_loop.index0].stat.exists
         - stale_source_stats.results[ansible_loop.index0].stat.dev == stale_target_stats.results[ansible_loop.index0].stat.dev
@@ -551,6 +553,7 @@
       changed_when: stale_host_umount.rc == 0
       when:
         - config.mode == 'bind'
+        - item.machine in (normalized | map(attribute='name') | list)
         - item.target in host_mounts
         - smolvm_sections.get(item.machine, {}).get('state', 'stopped') != 'running'
         - not ansible_check_mode
@@ -568,6 +571,7 @@
       when:
         - config.mode == 'bind'
         - item.target not in host_mounts
+        - item.machine in (normalized | map(attribute='name') | list)
         - not ansible_check_mode
       tags: [mounts]
 
