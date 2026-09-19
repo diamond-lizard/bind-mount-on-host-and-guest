@@ -23,8 +23,10 @@ the playbook created.
 *** Guest-side artifacts
 Three per machine: the root-owned script at
 /usr/local/sbin/bind-mount-on-guest.sh, the sudoers drop-in under
-/etc/sudoers.d, and the managed block in the primary user profile, which uses
-the standard blockinfile markers.
+/etc/sudoers.d, and the managed block in the primary user profile. That
+block carries bind-mounts-specific markers, so a block that another
+role's blockinfile wrote into the same profile is never matched, edited,
+or removed.
 *** The smolvm volumes
 Bind mode attaches share_root as one volume per machine. Direct mode attaches
 one volume per configured mount and removes the share volume.
