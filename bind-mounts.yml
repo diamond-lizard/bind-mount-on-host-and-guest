@@ -1594,7 +1594,9 @@
         dest: "{{ share_root_resolved }}/{{ ledger_file_name }}"
         mode: "0644"
       become: true
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - ansible_run_tags | intersect(['all', 'mounts', 'install', 'verify', 'start']) | length > 0
       tags: [always]
 
     # ================================================================
@@ -1823,4 +1825,21 @@
         - (ledger.machines | default({})).get(m.name, {}).get('installed', {}).get('bash_profile_block', false)
         - smolvm_sections[m.name].state == 'running'
         - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Prune the ledger entries of machines torn down by this run
+      vars:
+        ledger_remaining: >-
+          {{ (ledger.machines | default({})) | dict2items
+             | rejectattr('key', 'in', normalized | map(attribute='name') | list)
+             | items2dict }}
+      ansible.builtin.copy:
+        content: |
+          # Managed by bind-mounts.yml (ansible). DO NOT EDIT; overwritten on re-run.
+          #
+          {{ {'format': 1, 'mode': config.mode, 'machines': ledger_remaining} | to_nice_yaml(indent=2) }}
+        dest: "{{ share_root_resolved }}/{{ ledger_file_name }}"
+        mode: "0644"
+      become: true
+      when: not ansible_check_mode
       tags: [teardown, never]
