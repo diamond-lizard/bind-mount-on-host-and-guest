@@ -329,18 +329,32 @@
           {%- set stale_targets = stale_managed | map(attribute='target') | list -%}
           {%- set external = observed | rejectattr('target', 'in', desired_targets + stale_targets) | list -%}
           {%- set adds = [] -%}
+          {%- set removes = [] -%}
+          {%- set foreign = [] -%}
+          {%- set managed_resolved = [] -%}
+          {%- for e in managed -%}
+          {%- set _ = managed_resolved.append({'src': e.src | realpath, 'target': e.target}) -%}
+          {%- endfor -%}
+          {%- set force = bind_mounts_force_remount | default(false) | bool -%}
           {%- for v in desired -%}
           {%- set matching = observed | selectattr('target', 'eq', v.target) | first | default(none) -%}
           {%- if matching is none -%}
           {%- set spec = '--volume=' ~ v.src ~ ':' ~ v.target ~ (':ro' if v.ro else '') -%}
           {%- set _ = adds.append(spec) -%}
           {%- elif matching.src != v.src or matching.ro != v.ro -%}
+          {%- set obs_resolved = matching.src | realpath -%}
+          {%- set proven = (managed_resolved | selectattr('src', 'eq', obs_resolved) | selectattr('target', 'eq', matching.target) | list | length) > 0 -%}
+          {%- if proven or force -%}
           {%- set spec = '--volume=' ~ v.src ~ ':' ~ v.target ~ (':ro' if v.ro else '') -%}
           {%- set _ = adds.append(spec) -%}
           {%- set _ = removes.append('--remove-volume=' ~ matching.src ~ ':' ~ matching.target) -%}
+          {%- else -%}
+          {%- set _ = foreign.append('%-70s' | format('    ' ~ m.name ~ ': ' ~ matching.target)) -%}
+          {%- set _ = foreign.append('%-70s' | format('      observed:   ' ~ matching.src)) -%}
+          {%- set _ = foreign.append('%-70s' | format('      configured: ' ~ v.src)) -%}
+          {%- endif -%}
           {%- endif -%}
           {%- endfor -%}
-          {%- set removes = [] -%}
           {%- for v in stale_managed -%}
           {%- set _ = removes.append('--remove-volume=' ~ v.src ~ ':' ~ v.target) -%}
           {%- endfor -%}
@@ -349,10 +363,44 @@
                 'remove': removes,
                 'external': external | length,
                 'desired_count': desired | length,
+                'foreign': foreign,
               }}) -%}
           {%- endfor -%}
           {{ result }}
       tags: [attach, always]
+
+    - name: Collect volumes at configured targets the ledger cannot prove
+      ansible.builtin.set_fact:
+        volume_plan_foreign: >-
+          {{ volume_plans | dict2items | map(attribute='value.foreign') | flatten | list }}
+      tags: [always]
+
+    - name: >-
+        ACTION REQUIRED: volume(s) at configured targets without ledger proof
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['=' * 70,
+              '%-70s' | format('  Volume(s) at configured targets without ledger proof:')]
+             + volume_plan_foreign
+             + ['%-70s' | format('  The ledger does not prove this playbook created them, so they'),
+                '%-70s' | format('  would be removed and replaced. To accept the replacement,'),
+                '%-70s' | format('  re-run with: -e bind_mounts_force_remount=true'),
+                '%-70s' | format('  To keep the volume(s), remove them manually first:'),
+                '%-70s' | format('  smolvm machine update --name <machine> --remove-volume=<src>:<tgt>'),
+                '%-70s' | format('  Nothing else was changed by this run.'),
+                '=' * 70] }}
+      when:
+        - volume_plan_foreign | default([]) | length > 0
+        - ansible_run_tags | intersect(['all', 'attach', 'mounts', 'install', 'verify', 'start']) | length > 0
+      tags: [always]
+
+    - name: Stop because a volume at a configured target is not proven ours
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: volume(s) at configured targets need ledger proof; see the box above."
+      when:
+        - volume_plan_foreign | default([]) | length > 0
+        - ansible_run_tags | intersect(['all', 'attach', 'mounts', 'install', 'verify', 'start']) | length > 0
+      tags: [always]
 
     - name: Collect running machines that need volume changes (default run)
       ansible.builtin.set_fact:
