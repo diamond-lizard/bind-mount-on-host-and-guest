@@ -1323,9 +1323,17 @@
           {%- set out = [] -%}
           {%- for r in guest_mount_result.results | default([]) -%}
           {%- if r.rc is defined and r.rc not in [0, 3] -%}
-          {%- set _ = out.append(r.item.machine ~ ': ' ~ r.item.target ~ ' (helper rc ' ~ r.rc ~ ': ' ~ (r.stderr | default('') | trim | replace('\n', ' ') | truncate(140, True, '...')) ~ ')') -%}
+          {%- set msg = 'rc ' ~ r.rc ~ ': ' ~ (r.stderr | default('(no stderr)') | trim | replace('\n', ' ')) -%}
+          {%- set _ = out.append('%-70s' | format(('  ' ~ r.item.machine ~ ': ' ~ r.item.target)[:70])) -%}
+          {%- for line in (msg | wordwrap(64, true, '\n')).split('\n') -%}
+          {%- set _ = out.append('%-70s' | format('    ' ~ line)) -%}
+          {%- endfor -%}
           {%- elif r.rc is defined and r.rc == 0 and 'is mounted but' in (r.stderr | default('')) -%}
-          {%- set _ = out.append(r.item.machine ~ ': ' ~ r.item.target ~ ' (mounted, but the share subdirectory is empty)') -%}
+          {%- set msg = 'mounted, but the share subdirectory is empty (the host-side bind is missing)' -%}
+          {%- set _ = out.append('%-70s' | format(('  ' ~ r.item.machine ~ ': ' ~ r.item.target)[:70])) -%}
+          {%- for line in (msg | wordwrap(64, true, '\n')).split('\n') -%}
+          {%- set _ = out.append('%-70s' | format('    ' ~ line)) -%}
+          {%- endfor -%}
           {%- endif -%}
           {%- endfor -%}
           {{ out }}
