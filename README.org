@@ -245,7 +245,11 @@ attach after stopping, and start the machines with --tags start.
 ** Safety model
 *** The provenance ledger records everything the playbook creates
 The ledger lives beside the share subdirectories and records volumes, host
-binds, guest binds, and installed artifacts per machine. Its volume record
+binds, guest binds, and installed artifacts per machine. It records those
+artifacts by kind, not by path, so changed installed_script_guest_path or
+sudoers_dropin_guest_path values leave a copy at the old path behind and
+untracked; the removals act only on the paths the current configuration
+names. Its volume record
 is written again as soon as a run applies a volume change, so a run that
 fails before the final ledger write still describes the volumes that are
 attached. Entries that are in the ledger and in the configuration are
@@ -277,9 +281,14 @@ The login hook runs sudo -n against the root-owned 0755 copy of the script.
 <user> ALL=(root) NOPASSWD: /usr/local/sbin/bind-mount-on-guest.sh
 #+END_SRC
 
-The drop-in is validated with visudo before activation. The rule authorizes
-only the root-owned copy at /usr/local/sbin, so nothing under the
-user-writable share can run with NOPASSWD root privileges.
+The drop-in is validated with visudo before activation. It is installed at
+sudoers_dropin_guest_path (default /etc/sudoers.d/010-bind-mounts), which
+must stay in a directory the guest's sudoers includes. The rule authorizes
+only the root-owned 0755 copy at installed_script_guest_path (default
+/usr/local/sbin/bind-mount-on-guest.sh); keep that path in a root-owned
+directory outside the share, because a script the guest user can replace
+runs as root under NOPASSWD. Both are play variables, set with -e rather
+than in vars.yml.
 *** Writes are atomic and preserve ownership and mode
 Ledger and profile edits go through a temp file and rename, and the volume
 record a run writes after a volume change goes to the ledger the same way,
@@ -377,7 +386,7 @@ that applies a volume change writes the volume facts it recorded.
 **** Context
 The playbook reaches a guest only through smolvm machine exec, which runs
 as the exec user configured on the machine. Installing the login hook
-writes root-owned files (the script under /usr/local/sbin and the
+writes root-owned files (the script at the configured script path and the
 sudoers drop-in), and the guest-side mounts need root.
 **** Cause
 The machine's configured exec user is not root, typically because it was

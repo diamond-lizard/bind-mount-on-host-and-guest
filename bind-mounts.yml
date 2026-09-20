@@ -18,6 +18,7 @@
   vars:
     installed_script_guest_path: /usr/local/sbin/bind-mount-on-guest.sh
     sudoers_dropin_guest_path: /etc/sudoers.d/010-bind-mounts
+    sudoers_staging_guest_path: "/tmp/{{ sudoers_dropin_guest_path | basename }}"
     ledger_file_name: .bind-mounts-state.yml
   tasks:
 
@@ -61,6 +62,24 @@
           Invalid configuration: mode must be 'bind' or 'direct', machines must
           be a non-empty list, and share_root / share_target must be absolute
           paths without whitespace.
+      tags: [always]
+
+    - name: Assert guest artifact paths are absolute and whitespace-free
+      ansible.builtin.assert:
+        that:
+          - installed_script_guest_path is match('/')
+          - installed_script_guest_path is not search('\\s')
+          - sudoers_dropin_guest_path is match('/')
+          - sudoers_dropin_guest_path is not search('\\s')
+          - sudoers_dropin_guest_path | basename | length > 0
+          - sudoers_staging_guest_path is match('/')
+          - sudoers_staging_guest_path is not search('\\s')
+          - sudoers_staging_guest_path != sudoers_dropin_guest_path
+        msg: >-
+          installed_script_guest_path and sudoers_dropin_guest_path must be
+          absolute paths without whitespace, ending in a file name; the guest
+          staging path must be absolute, whitespace-free, and different from
+          the drop-in destination.
       tags: [always]
 
     - name: Normalize limit_machines
@@ -1383,6 +1402,7 @@
           - "{{ m.profile_path }}"
           - "{{ m.uid | string }}"
           - "{{ m.gid | string }}"
+          - "{{ installed_script_guest_path }}"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -1412,7 +1432,7 @@
       tags: [install]
 
     - name: Copy the sudoers drop-in into each machine
-      ansible.builtin.command: "smolvm machine cp /tmp/bind-mounts-{{ m.name }}.sudoers {{ m.name }}:/tmp/010-bind-mounts"
+      ansible.builtin.command: "smolvm machine cp /tmp/bind-mounts-{{ m.name }}.sudoers {{ m.name }}:{{ sudoers_staging_guest_path }}"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -1435,7 +1455,7 @@
           - --
           - visudo
           - -cf
-          - /tmp/010-bind-mounts
+          - "{{ sudoers_staging_guest_path }}"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -1463,7 +1483,7 @@
           - root
           - -g
           - root
-          - /tmp/010-bind-mounts
+          - "{{ sudoers_staging_guest_path }}"
           - "{{ sudoers_dropin_guest_path }}"
       loop: "{{ normalized }}"
       loop_control:
@@ -1595,6 +1615,7 @@
           - "{{ m.profile_path }}"
           - "{{ m.uid | string }}"
           - "{{ m.gid | string }}"
+          - "{{ installed_script_guest_path }}"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -1611,6 +1632,8 @@
       tags: [install]
 
     - name: Clean up host-side temp files
+      # The '/tmp/010-bind-mounts' entry is the host-side staging
+      # name from before per-machine staging, not the guest path.
       vars:
         temp_paths: >-
           {%- set paths = ['/tmp/010-bind-mounts'] -%}
@@ -1639,7 +1662,7 @@
           - --
           - sh
           - -c
-          - "[ -e /tmp/010-bind-mounts ] || [ -e /tmp/profile-manage.py ]; stale=$?; rm -f /tmp/010-bind-mounts /tmp/profile-manage.py; exit $stale"
+          - "[ -e {{ sudoers_staging_guest_path }} ] || [ -e /tmp/profile-manage.py ]; stale=$?; rm -f {{ sudoers_staging_guest_path }} /tmp/profile-manage.py; exit $stale"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -2388,6 +2411,7 @@
           - "{{ m.profile_path }}"
           - "{{ m.uid | string }}"
           - "{{ m.gid | string }}"
+          - "{{ installed_script_guest_path }}"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m

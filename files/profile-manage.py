@@ -10,7 +10,7 @@ and are rewritten with the unique markers by the next apply: a block carrying
 the stock markers whose body invokes this playbook's guest script, and the
 original marker-less form (the bare hook lines).
 
-Usage: profile-manage.py apply|remove <profile-path> <uid> <gid>
+Usage: profile-manage.py apply|remove <profile-path> <uid> <gid> <script-path>
 Exit codes: 0 = success; 2 = refused (ambiguous markers or bad usage).
 """
 import os
@@ -22,13 +22,17 @@ OWN_END = "# END BIND-MOUNTS MANAGED BLOCK"
 STOCK_START = "# BEGIN ANSIBLE MANAGED BLOCK"
 STOCK_END = "# END ANSIBLE MANAGED BLOCK"
 HOOK_COMMAND = "bind-mount-on-guest.sh"
-BLOCK_LINES = [
-    OWN_START,
-    "if [ -x /usr/local/sbin/bind-mount-on-guest.sh ]; then",
-    "    sudo -n /usr/local/sbin/bind-mount-on-guest.sh",
-    "fi",
-    OWN_END,
-]
+
+
+def block_lines(script_path):
+    """The managed block's lines, invoking the configured guest script."""
+    return [
+        OWN_START,
+        f"if [ -x {script_path} ]; then",
+        f"    sudo -n {script_path}",
+        "fi",
+        OWN_END,
+    ]
 
 
 def marker_block(lines, start, end):
@@ -99,12 +103,13 @@ def legacy_block(lines):
     return first, last
 
 
-def plan(mode, lines, profile, existed):
+def plan(mode, lines, profile, existed, script_path):
     """Return (new_lines, message) for one edit, or (None, message) when the
     file is already in the wanted state. Raises ValueError when the markers
     are ambiguous."""
+    block = block_lines(script_path)
     own = marker_block(lines, OWN_START, OWN_END)
-    ours = [block for block in stock_blocks(lines) if is_ours(lines, block)]
+    ours = [pair for pair in stock_blocks(lines) if is_ours(lines, pair)]
     if len(ours) > 1:
         raise ValueError("more than one managed block carries the stock markers")
 
@@ -115,28 +120,29 @@ def plan(mode, lines, profile, existed):
         return lines[:target[0]] + lines[target[1] + 1:], f"removed managed block from {profile}"
 
     if own is not None:
-        if lines[own[0]:own[1] + 1] == BLOCK_LINES:
+        if lines[own[0]:own[1] + 1] == block:
             return None, f"unchanged managed block in {profile}"
-        return lines[:own[0]] + BLOCK_LINES + lines[own[1] + 1:], f"updated managed block in {profile}"
+        return lines[:own[0]] + block + lines[own[1] + 1:], f"updated managed block in {profile}"
     if ours:
         first, last = ours[0]
-        return lines[:first] + BLOCK_LINES + lines[last + 1:], (
+        return lines[:first] + block + lines[last + 1:], (
             f"updated managed block in {profile} (migrated the stock markers)")
     legacy = legacy_block(lines)
     if legacy is not None:
-        return lines[:legacy[0]] + BLOCK_LINES + lines[legacy[1] + 1:], (
+        return lines[:legacy[0]] + block + lines[legacy[1] + 1:], (
             f"replaced the legacy bind-mount block in {profile}")
     if not existed:
-        return list(BLOCK_LINES), f"created {profile} with the managed block"
-    return lines + [""] + BLOCK_LINES, f"appended managed block to {profile}"
+        return list(block), f"created {profile} with the managed block"
+    return lines + [""] + block, f"appended managed block to {profile}"
 
 
 def main():
-    if len(sys.argv) != 5:
-        print("usage: profile-manage.py apply|remove <profile-path> <uid> <gid>", file=sys.stderr)
+    if len(sys.argv) != 6:
+        print("usage: profile-manage.py apply|remove <profile-path> <uid> <gid> <script-path>", file=sys.stderr)
         return 2
     mode, profile = sys.argv[1], sys.argv[2]
     owner_uid, owner_gid = int(sys.argv[3]), int(sys.argv[4])
+    script_path = sys.argv[5]
     if mode not in ("apply", "remove"):
         print(f"error: unknown mode {mode!r} (use apply or remove)", file=sys.stderr)
         return 2
@@ -149,7 +155,7 @@ def main():
         lines = []
 
     try:
-        new_lines, message = plan(mode, lines, profile, existed)
+        new_lines, message = plan(mode, lines, profile, existed, script_path)
     except ValueError as exc:
         print(f"error: {exc} in {profile}; refusing to edit", file=sys.stderr)
         return 2

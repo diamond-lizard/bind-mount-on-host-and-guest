@@ -23,9 +23,11 @@ share_root holds one subdirectory per mount; each is bind-mounted from its
 source on the host. The ledger file .bind-mounts-state.yml records everything
 the playbook created.
 *** Guest-side artifacts
-Three per machine: the root-owned script at
-/usr/local/sbin/bind-mount-on-guest.sh, the sudoers drop-in under
-/etc/sudoers.d, and the managed block in the primary user profile. That
+Three per machine: the root-owned script at the configured script path
+(by default /usr/local/sbin/bind-mount-on-guest.sh), the sudoers drop-in
+at the configured path (by default /etc/sudoers.d/010-bind-mounts, in a
+directory the guest's sudoers includes), and the managed block in the
+primary user profile. That
 block carries bind-mounts-specific markers, so a block that another
 role's blockinfile wrote into the same profile is never matched, edited,
 or removed.
@@ -44,7 +46,7 @@ vars.yml ──▶ bind-mounts.yml ──▶ mount --bind <src> <share_root>/<na
         guest <target>
         verified: target device:inode == <share_target>/<name> device:inode
 
-login fallback: .bash_profile ─▶ sudo -n /usr/local/sbin/bind-mount-on-guest.sh
+login fallback: .bash_profile ─▶ sudo -n <script path>
 #+END_SRC
 ** Direct-mode data flow
 #+BEGIN_SRC text
@@ -141,6 +143,9 @@ that points at a script inside the shared volume is equivalent to full root,
 because the guest user can rewrite that script. This design closes the hole:
 the playbook renders the script from the configuration, copies it to a
 root-owned 0755 path, and scopes the sudoers rule to exactly that path.
+The configured script path must stay in a root-owned directory: the copy
+is made root-owned 0755, but a copy the guest user can replace is
+equivalent to full root. The default under /usr/local/sbin is one.
 
 #+BEGIN_SRC
 <user> ALL=(root) NOPASSWD: /usr/local/sbin/bind-mount-on-guest.sh
