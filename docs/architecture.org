@@ -17,7 +17,11 @@ unchanged.
 *** The filter plugin
 filter_plugins/smolvm_facts.py parses smolvm machine ls --verbose into
 per-machine state and volume lists. The format was verified against real
-output in both running and stopped states.
+output in both running and stopped states. The playbook reads every start,
+stop, volume and verification decision from those states and understands
+only running and stopped, so the prelude refuses any machine state outside
+that vocabulary (naming the machine and the token) rather than letting the
+running/stopped comparisons fall through to a branch neither of them chose.
 *** The share root and the ledger
 share_root holds one subdirectory per mount; each is bind-mounted from its
 source on the host. The ledger file .bind-mounts-state.yml records everything

@@ -15,9 +15,10 @@ file, is safe to re-run in any state reachable through normal playbook
 operation, and never touches a mount or volume it cannot prove it
 created. Unusual states are refused, not auto-fixed: a mount whose
 content does not match the configuration, a volume at a target the
-configuration names whose ownership the ledger cannot prove, or stack
-layers whose ownership the ledger cannot prove, halt the run with
-instructions instead of being modified.
+configuration names whose ownership the ledger cannot prove, stack
+layers whose ownership the ledger cannot prove, or a machine state the
+playbook cannot reason about (it knows only running and stopped), halt
+the run with instructions instead of being modified.
 
 Two modes are supported. In bind mode the playbook consolidates every
 configured directory under one share directory (share_root), attaches that
