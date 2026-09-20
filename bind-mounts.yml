@@ -23,6 +23,12 @@
     # The directory sits on the guest's tmpfs /tmp, so a shutdown clears it,
     # and every use is preceded by a fresh copy.
     helper_dir_guest_path: /tmp/010-bind-mounts-helpers
+    # The provenance ledger lives outside the share root, in the playbook
+    # user's own state directory: no guest can see it, and every write runs
+    # as the invoking user without become. lookup('env','HOME') follows the
+    # invoking shell even when a task uses become; never spell the directory
+    # as ~/... in a dest, where become would expand it to root's home.
+    bind_mounts_state_dir: "{{ lookup('env', 'HOME') }}/.local/state/bind-mount-on-host-and-guest"
     ledger_file_name: .bind-mounts-state.yml
     # The machine states the running/stopped comparisons in this playbook
     # understand. Any other token takes their "neither" path, so the prelude
@@ -70,6 +76,19 @@
           Invalid configuration: mode must be 'bind' or 'direct', machines must
           be a non-empty list, and share_root / share_target must be absolute
           paths without whitespace.
+      tags: [always]
+
+    - name: Assert the ledger state directory is absolute and outside the share
+      ansible.builtin.assert:
+        that:
+          - bind_mounts_state_dir is match('/')
+          - bind_mounts_state_dir is not search('\\s')
+          - not (bind_mounts_state_dir ~ '/') is match(config.share_root | realpath ~ '/')
+        msg: >-
+          Invalid configuration: bind_mounts_state_dir must be an absolute path
+          without whitespace and must not sit inside share_root - the ledger is
+          host-only by decision, and share_root is attached to guests in bind
+          mode.
       tags: [always]
 
     - name: Assert guest artifact paths are absolute and whitespace-free
@@ -312,9 +331,17 @@
     # ================================================================
     # 3. Provenance ledger
     # ================================================================
-    - name: Read the provenance ledger from the share
+    - name: Create the ledger state directory
+      ansible.builtin.file:
+        path: "{{ bind_mounts_state_dir }}"
+        state: directory
+        mode: "0700"
+      when: not ansible_check_mode
+      tags: [always]
+
+    - name: Read the provenance ledger
       ansible.builtin.set_fact:
-        ledger_text: "{{ lookup('ansible.builtin.file', share_root_resolved ~ '/' ~ ledger_file_name, errors='ignore') | default('', true) }}"
+        ledger_text: "{{ lookup('ansible.builtin.file', bind_mounts_state_dir ~ '/' ~ ledger_file_name, errors='ignore') | default('', true) }}"
       tags: [always]
 
     - name: Normalize the provenance ledger
@@ -329,7 +356,7 @@
     - name: Warn when the ledger is unreadable
       ansible.builtin.debug:
         msg: >-
-          WARNING: the ledger at {{ share_root_resolved }}/{{ ledger_file_name }}
+          WARNING: the ledger at {{ bind_mounts_state_dir }}/{{ ledger_file_name }}
           is unreadable or corrupt. Stale-element cleanup is disabled for this
           run: nothing playbook-managed will be removed. Fix or delete the
           ledger file to re-enable cleanup.
@@ -2339,9 +2366,8 @@
           # Managed by bind-mounts.yml (ansible). DO NOT EDIT; overwritten on re-run.
           #
           {{ ledger_new | to_nice_yaml(indent=2) }}
-        dest: "{{ share_root_resolved }}/{{ ledger_file_name }}"
+        dest: "{{ bind_mounts_state_dir }}/{{ ledger_file_name }}"
         mode: "0644"
-      become: true
       when:
         - not ansible_check_mode
         - ansible_run_tags | intersect(['all', 'mounts', 'install', 'verify', 'start']) | length > 0
@@ -2666,8 +2692,7 @@
           # Managed by bind-mounts.yml (ansible). DO NOT EDIT; overwritten on re-run.
           #
           {{ {'format': 1, 'mode': config.mode, 'machines': ledger_remaining} | to_nice_yaml(indent=2) }}
-        dest: "{{ share_root_resolved }}/{{ ledger_file_name }}"
+        dest: "{{ bind_mounts_state_dir }}/{{ ledger_file_name }}"
         mode: "0644"
-      become: true
       when: not ansible_check_mode
       tags: [teardown, never]

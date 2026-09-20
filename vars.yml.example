@@ -16,10 +16,11 @@
 #            partial tags refuse a pending volume change instead of applying it.
 mode: bind
 
-# Host directory holding one subdirectory per mount. Also stores the
-# playbook's provenance ledger (.bind-mounts-state.yml). Required in both
-# modes. The ledger is rewritten whenever a run changes a machine's volume
-# set, so a run that stops early still records what it attached.
+# Host directory holding one subdirectory per mount. Required in both
+# modes. A run that changes a machine's volume set rewrites the provenance
+# ledger, which lives in the playbook user's state directory
+# (~/.local/state/bind-mount-on-host-and-guest/), so a run that stops early
+# still records what it attached.
 share_root: /home/you/share
 
 # Guest path at which share_root is mounted (bind mode).

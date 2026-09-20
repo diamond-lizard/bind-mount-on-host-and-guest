@@ -22,10 +22,16 @@ stop, volume and verification decision from those states and understands
 only running and stopped, so the prelude refuses any machine state outside
 that vocabulary (naming the machine and the token) rather than letting the
 running/stopped comparisons fall through to a branch neither of them chose.
-*** The share root and the ledger
+*** The share root
 share_root holds one subdirectory per mount; each is bind-mounted from its
-source on the host. The ledger file .bind-mounts-state.yml records everything
-the playbook created.
+source on the host. Bind mode attaches it to each machine as a volume, so
+anything inside it is guest-visible.
+*** The provenance ledger
+The ledger file .bind-mounts-state.yml lives in the playbook user's state
+directory (~/.local/state/bind-mount-on-host-and-guest/), mode 0644, and
+records everything the playbook created. A run reads it at the start and
+rewrites it as the invoking user, without become; it is host-only, and no
+guest can see it.
 *** Guest-side artifacts
 Four per machine: the root-owned script at the configured script path
 (by default /usr/local/sbin/bind-mount-on-guest.sh), the sudoers drop-in
@@ -188,7 +194,8 @@ The rule is validated with visudo before activation, and the profile hook
 invokes the script with sudo -n so a missing rule fails fast instead of
 prompting. Guest management itself uses smolvm machine exec, which runs as
 the machine's configured user, so no host-side passwordless sudo is involved;
-host-side bind mounts use Ansible become with password sudo.
+host-side bind mounts use Ansible become with password sudo, while the
+ledger is written as the invoking user without become.
 ** Failure and corner cases
 *** Stale mounts are remediated when proven, refused otherwise — on stopped machines
 A stale host or guest bind the ledger proves is playbook-owned is

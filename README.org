@@ -164,8 +164,10 @@ machines:
         gid: 1000
 #+END_SRC
 *** mode selects bind or direct operation
-*** share_root holds the per-mount subdirectories and the ledger
+*** share_root holds the per-mount subdirectories
 It is required in both modes and must be an absolute path without whitespace.
+The provenance ledger is not stored here; it lives in the playbook user's
+state directory (see Ledger).
 *** share_target is the guest path of the share root in bind mode
 *** machines holds one entry per smolvm machine with unique names
 **** user plus uid and gid select the account and created-dir ownership
@@ -247,13 +249,14 @@ For step-by-step control you can still converge explicitly with --tags
 attach after stopping, and start the machines with --tags start.
 ** Safety model
 *** The provenance ledger records what each run observes
-The ledger lives beside the share subdirectories and records volumes, host
-binds, guest binds, and installed artifacts per machine. It records those
-artifacts by kind, not by path, so changed installed_script_guest_path or
-sudoers_dropin_guest_path values leave a copy at the old path behind and
-untracked; the removals act only on the paths the current configuration
-names. The guest helper copies are not in the ledger at all: they are
-staged under the configured helper directory and removed by the run that
+The ledger lives in the playbook user's state directory, outside the share,
+and records volumes, host binds, guest binds, and installed artifacts per
+machine. It records those artifacts by kind, not by path, so changed
+installed_script_guest_path or sudoers_dropin_guest_path values leave a copy
+at the old path behind and untracked; the removals act only on the paths the
+current configuration names. The guest helper copies are not in the ledger at
+all: they are staged under the configured helper directory and removed by the
+run that
 used them, and such a removal touches a file only when it carries the
 helpers' ownership marker. Its volume record
 names each source as the canonical host path, and is written again as soon
@@ -364,10 +367,13 @@ mount is not covered: the run prints the exact umount command instead.
 *** Guest-side share path: share_target followed by the mount name
 *** Host bind: a bind mount from a source directory to its share subdirectory
 *** Ledger
-The file .bind-mounts-state.yml inside the share root. It records
+The file .bind-mounts-state.yml in the playbook user's state directory,
+~/.local/state/bind-mount-on-host-and-guest/, mode 0644. It records
 everything the playbook created, is read at the start of a run, and is
-written again whenever a volume change is applied and at the end of a
-successful run; it is the basis of provenance and stale-element cleanup.
+written again by the playbook's own user, without sudo or become, whenever
+a volume change is applied and at the end of a successful run; it is the
+basis of provenance and stale-element cleanup. It sits outside the share
+root, so no guest can see it.
 *** Login hook
 The managed block in the machine user's .bash_profile that re-applies
 the guest binds at every login through passwordless sudo.
@@ -404,12 +410,16 @@ Remove mounts from vars.yml, or raise max_volumes only if you know the
 machine has headroom; see smolvm issue
 [[https://github.com/smol-machines/smolvm/issues/941][#941]].
 *** An unreadable ledger disables cleanup for that run
-Fix or delete the ledger file; deleting it loses the cleanup bookkeeping,
-and with no proof at all a volume the configuration does not want at a
-target it names is left alone instead of refused. While the file exists
-and is unreadable nothing is written either, so fix or delete it, then
-re-run to record the volumes a run changes. With the file gone, a run
-that applies a volume change writes the volume facts it recorded.
+Fix or delete
+~/.local/state/bind-mount-on-host-and-guest/.bind-mounts-state.yml; the
+playbook user owns it, so no sudo is needed. Deleting it loses the cleanup
+bookkeeping, and with no proof at all a volume the configuration does not
+want at a target it names is left alone instead of refused. While the file
+exists and is unreadable nothing is written either, so fix or delete it,
+then re-run to record the volumes a run changes. With the file gone, a run
+that applies a volume change writes the volume facts it recorded. A
+.bind-mounts-state.yml left in the share root by an older version is
+ignored; delete or move it.
 *** The smolvm exec user must be root for the playbook to manage a guest
 **** Context
 The playbook reaches a guest only through smolvm machine exec, which runs

@@ -60,9 +60,8 @@
       # Managed by bind-mounts.yml (ansible). DO NOT EDIT; overwritten on re-run.
       #
       {{ ledger | to_nice_yaml(indent=2) }}
-    dest: "{{ share_root_resolved }}/{{ ledger_file_name }}"
+    dest: "{{ bind_mounts_state_dir }}/{{ ledger_file_name }}"
     mode: "0644"
-  become: true
   when:
     - not ansible_check_mode
     - volume_record_machines | length > 0
