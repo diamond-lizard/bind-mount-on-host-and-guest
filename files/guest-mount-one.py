@@ -63,8 +63,9 @@ def main():
         return 3
 
     if not os.listdir(share):
-        print(f"error: {share} is empty; the host-side bind is probably missing (did the host reboot?).", file=sys.stderr)
-        print("error: run the playbook on the host, then log in again; not binding an empty directory.", file=sys.stderr)
+        print(f"EMPTY-SHARE: {share} is empty; the host-side bind is probably missing (did the host reboot?).", file=sys.stderr)
+        print("EMPTY-SHARE: remedy: run the playbook on the host, then log in again.", file=sys.stderr)
+        print("EMPTY-SHARE: refusing to bind an empty share directory.", file=sys.stderr)
         return 4
     existed = os.path.isdir(target)
     os.makedirs(target, exist_ok=True)
