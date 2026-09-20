@@ -631,7 +631,7 @@
           - -c
           - |
             import os, subprocess, sys
-            src, tgt, recorded, machine, state, guest_target, force = sys.argv[1:8]
+            src, tgt, recorded, machine, state, guest_target, force, share_root = sys.argv[1:9]
             def stat_id(path):
                 try:
                     st = os.stat(path)
@@ -647,11 +647,16 @@
             def subpath(source):
                 return source[source.find('[')+1:-1].lstrip('/') if '[' in source else source.lstrip('/')
             def layer_removable(source):
+                # A stacked layer is ours when it is the share root itself or
+                # below it, the configured source, the ledger-recorded source,
+                # or when the operator forced replacement.
                 sp = subpath(source)
-                return (sp.startswith('share/')
+                sr = subpath(share_root.rstrip('/'))
+                return (sp == sr
+                        or sp.startswith(sr + '/')
                         or sp == subpath(src)
                         or (recorded and sp == subpath(recorded))
-                        or (force == "true" and sp.startswith('home/cthulhu/')))
+                        or force == "true")
             layers = mount_lines()
             if not layers:
                 print("REMEDIATE: not mounted", file=sys.stderr)
@@ -710,6 +715,7 @@
           - "{{ smolvm_sections[item.machine].state }}"
           - "{{ item.target }}"
           - "{{ bind_mounts_force_remount | default(false) | bool | string | lower }}"
+          - "{{ share_root_resolved }}"
       loop: "{{ all_mounts }}"
       loop_control:
         extended: true
