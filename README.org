@@ -123,8 +123,19 @@ run halts and names every affected host and guest path. Re-run with
 -e bind_mounts_force_remount=true to accept; forcing unmounts and
 replaces the listed mounts. Forcing also requires a stopped machine for
 the same libkrun reason. Every stack layer is individually
-ownership-checked: layers the playbook cannot prove it created are never
-removed, even with force.
+ownership-checked, so force on its own accepts only layers the playbook
+can prove it created.
+
+A layer it cannot prove, such as one left behind by an earlier layout
+or mounted by hand, is accepted when its path is named in
+bind_mounts_force_allow_prefixes, an extra-vars value that defaults to
+empty and holds one path or several separated by commas. Only layers at
+or below a named path are accepted, and a layer that is not named stays
+refused even when force is set.
+
+#+BEGIN_SRC
+ansible-playbook bind-mounts.yml -i inventory -K -e bind_mounts_force_remount=true -e bind_mounts_force_allow_prefixes=/home/you/share-old
+#+END_SRC
 ** Configuration reference
 The block below shows the shape of vars.yml; every path in it is a fictitious
 example. Copy vars.yml.example to vars.yml and replace names, users, and

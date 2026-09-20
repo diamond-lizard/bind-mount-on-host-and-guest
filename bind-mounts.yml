@@ -394,6 +394,7 @@
         - ansible_run_tags | intersect(['all', 'attach', 'mounts', 'install', 'verify', 'start']) | length > 0
       tags: [always]
 
+
     - name: Stop because a volume at a configured target is not proven ours
       ansible.builtin.fail:
         msg: "ACTION REQUIRED: volume(s) at configured targets need ledger proof; see the box above."
@@ -576,16 +577,31 @@
         - stale_out_of_scope | default([]) | length > 0
       tags: [mounts]
 
-    - name: ACTION REQUIRED stale mounts need a stopped machine
+    - name: >-
+        ACTION REQUIRED: stale mounts need a stopped machine
+      ansible.builtin.debug:
+        msg:
+          - "{{ '%-70s' | format('=' * 69) }}"
+          - "{{ '%-70s' | format('  Machine(s) whose stale mounts need the machine stopped:') }}" 
+          - "{{ '%-70s' | format('') }}"
+          - "{{ '%-70s' | format(('    ' ~ (stale_needing_stop | unique | join(', ')))[:70]) }}"
+          - "{{ '%-70s' | format('') }}"
+          - "{{ '%-70s' | format('  The machine is running, and the playbook cannot replace') }}" 
+          - "{{ '%-70s' | format('  these mounts while it runs. Stop each machine above,') }}" 
+          - "{{ '%-70s' | format('  then re-run this playbook:') }}" 
+          - "{{ '%-70s' | format('') }}"
+          - "{{ '%-70s' | format('      smolvm machine stop --name <machine-name>') }}"
+          - "{{ '%-70s' | format('') }}"
+          - "{{ '%-70s' | format('  Nothing else was changed by this run.') }}"
+          - "{{ '%-70s' | format('=' * 69) }}"
+      when:
+        - config.mode == 'bind'
+        - stale_needing_stop | default([]) | length > 0
+      tags: [mounts]
+
+    - name: Stop because stale mounts need a stopped machine
       ansible.builtin.fail:
-        msg: >-
-          {{ stale_needing_stop | unique | length }} machine(s) are running with
-          stale mounts that cannot be removed or replaced while running
-          (libkrun pins the old bind): {{ stale_needing_stop | unique | join(', ') }}.
-          For each machine listed, run: smolvm machine stop --name <machine-name>;
-          then re-run this playbook — the stale mount is cleaned up (or
-          remediated) while the machine is stopped. Nothing else was changed
-          by this run.
+        msg: "ACTION REQUIRED: stop the machine(s) listed in the box above, then re-run."
       when:
         - config.mode == 'bind'
         - stale_needing_stop | default([]) | length > 0
@@ -630,8 +646,8 @@
           - python3
           - -c
           - |
-            import os, subprocess, sys
-            src, tgt, recorded, machine, state, guest_target, force, share_root = sys.argv[1:9]
+            import json, os, subprocess, sys
+            src, tgt, recorded, machine, state, guest_target, force, share_root, allow_json = sys.argv[1:10]
             def stat_id(path):
                 try:
                     st = os.stat(path)
@@ -642,28 +658,74 @@
                 return subprocess.run(["findmnt", "-rn", "-o", field, "-M", tgt],
                                       capture_output=True, text=True)
             def mount_lines():
-                p = findmnt("SOURCE")
-                return [] if p.returncode != 0 else p.stdout.splitlines()
+                # findmnt renders a bind as device[filesystem-relative path],
+                # which keeps the source path recoverable. `mount` prints the
+                # bare device for a bind, which loses it.
+                p = subprocess.run(["findmnt", "-rn", "-o", "SOURCE", "-M", tgt],
+                                   capture_output=True, text=True)
+                if p.returncode != 0:
+                    return []
+                return [l.strip() for l in p.stdout.splitlines() if l.strip()]
             def subpath(source):
                 return source[source.find('[')+1:-1].lstrip('/') if '[' in source else source.lstrip('/')
-            def layer_removable(source):
-                # A stacked layer is ours when it is the share root itself or
-                # below it, the configured source, the ledger-recorded source,
-                # or when the operator forced replacement.
-                sp = subpath(source)
-                sr = subpath(share_root.rstrip('/'))
+            def norm(path):
+                # findmnt reports a source as it was mounted, so one side of a
+                # comparison can be a symlinked path and the other resolved.
+                return os.path.realpath('/' + path.lstrip('/'))
+            try:
+                allow_raw = json.loads(allow_json or "[]")
+            except ValueError:
+                allow_raw = allow_json or ""
+            if isinstance(allow_raw, str):
+                allow_raw = [p.strip().strip('"').strip("'") for p in allow_raw.strip().strip('[]').split(',')]
+                allow_raw = [p for p in allow_raw if p]
+            allow_prefixes = [norm(str(p).rstrip('/')) for p in allow_raw]
+            def layer_provable(source):
+                # The playbook can prove a layer is its own when it sits at or
+                # below the share root, or is exactly the configured source or
+                # the ledger-recorded source.
+                sp, sr = norm(subpath(source)), norm(share_root.rstrip('/'))
                 return (sp == sr
                         or sp.startswith(sr + '/')
-                        or sp == subpath(src)
-                        or (recorded and sp == subpath(recorded))
-                        or force == "true")
+                        or sp == norm(subpath(src))
+                        or bool(recorded and sp == norm(subpath(recorded))))
+            def layer_forced(source):
+                # Force accepts a layer only when its path was named in
+                # bind_mounts_force_allow_prefixes.
+                sp = norm(subpath(source))
+                return force == "true" and any(
+                    sp == p or sp.startswith(p + '/') for p in allow_prefixes)
+            def layer_removable(source):
+                return layer_provable(source) or layer_forced(source)
+            def layer_label(source):
+                sp = subpath(source)
+                if sp == subpath(src):
+                    return "(configured source)"
+                if recorded and sp == subpath(recorded):
+                    return "(ledger-recorded)"
+                spn, srn = norm(sp), norm(share_root.rstrip('/'))
+                if spn == srn or spn.startswith(srn + '/'):
+                    return "(under the share root)"
+                if layer_forced(source):
+                    return "(allowed by force)"
+                return "(not ours)"
+            def layer_display(source, suffix=""):
+                # Show the path an operator recognizes first. Keep the device
+                # beside it only while the box line still fits its width.
+                if "[" in source and source.endswith("]"):
+                    dev, path = source.split("[", 1)
+                    path = path[:-1]
+                    if len(f"      {path}  ({dev})  {suffix}") <= 69:
+                        return f"{path}  ({dev})"
+                    return path
+                return source
             layers = mount_lines()
             if not layers:
                 print("REMEDIATE: not mounted", file=sys.stderr)
                 sys.exit(10)
             print(f"LAYERS: {len(layers)}")
             for l in layers:
-                print(f"LAYER-SRC: {l}")
+                print(f"LAYER-SRC: {layer_display(l, layer_label(l))}  {layer_label(l)}")
             opts = findmnt("OPTIONS").stdout.splitlines()[0]
             ro_now = "ro" in opts.split(",")
             print(f"RO-STATE: {'ro' if ro_now else 'rw'}")
@@ -680,16 +742,29 @@
                 sys.exit(0)
             if state == "running":
                 why = "proven ours by ledger" if ours else "not proven by the ledger"
-                print(f"ACTION REQUIRED: stale bind at {tgt} ({why}) cannot be replaced while machine {machine} is running: libkrun pins the old bind.", file=sys.stderr)
+                print(f"ACTION REQUIRED: stale bind at {tgt} ({why}) cannot be replaced while machine {machine} is running.", file=sys.stderr)
                 print(f"ACTION REQUIRED:   smolvm machine stop --name {machine}", file=sys.stderr)
                 print("ACTION REQUIRED: then re-run this playbook; the stale bind is remediated while the machine is stopped.", file=sys.stderr)
                 sys.exit(4)
             if not (ours or force == "true"):
-                print(f"FOREIGN: {tgt} is bound from different content than {src}, and the ledger does not prove this bind is ours", file=sys.stderr)
+                print(f"REFUSED: {tgt} is bound from different content than {src}, and the playbook", file=sys.stderr)
+                print("REFUSED: cannot prove it created every layer of the stack.", file=sys.stderr)
+                print("REFUSED:   layers at that path, bottom first:", file=sys.stderr)
+                wanted = [l for l in layers if not layer_provable(l)]
                 for l in layers:
-                    print(f"FOREIGN:   layer: {l}", file=sys.stderr)
-                print("FOREIGN: re-run with -e bind_mounts_force_remount=true to accept, or unmount manually:", file=sys.stderr)
-                print(f"FOREIGN:   host: sudo umount {tgt}", file=sys.stderr)
+                    print(f"REFUSED:     {layer_display(l)}", file=sys.stderr)
+                for l in wanted:
+                    print(f"ALLOW-PREFIX: /{subpath(l)}")
+                print("REFUSED: nothing was mounted, unmounted or otherwise changed.", file=sys.stderr)
+                print("REFUSED: to rebuild the mount from the configured source, re-run with", file=sys.stderr)
+                print("REFUSED:   -e bind_mounts_force_remount=true", file=sys.stderr)
+                if wanted:
+                    spec = ",".join('/' + subpath(l) for l in wanted)
+                    print("REFUSED: force accepts a layer the playbook cannot prove only when", file=sys.stderr)
+                    print("REFUSED: its path is named explicitly:", file=sys.stderr)
+                    print(f"REFUSED:   -e bind_mounts_force_allow_prefixes={spec}", file=sys.stderr)
+                print(f"REFUSED: to clear it by hand, with the machine stopped:", file=sys.stderr)
+                print(f"REFUSED:   sudo umount {tgt}", file=sys.stderr)
                 sys.exit(3)
             for _ in range(10):
                 layers = mount_lines()
@@ -697,13 +772,24 @@
                     break
                 bad = [l for l in layers if not layer_removable(l)]
                 if bad:
-                    print(f"FOREIGN: refusing to unmount {tgt}: layers the playbook cannot prove it created:", file=sys.stderr)
+                    print(f"REFUSED: {tgt} is stacked, and these layers cannot be proven ours:", file=sys.stderr)
+                    print("REFUSED:   layers at that path, bottom first:", file=sys.stderr)
                     for l in bad:
-                        print(f"FOREIGN:   layer: {l}", file=sys.stderr)
+                        print(f"REFUSED:     {layer_display(l)}", file=sys.stderr)
+                        print(f"ALLOW-PREFIX: /{subpath(l)}")
+                    print("REFUSED: nothing was mounted, unmounted or otherwise changed.", file=sys.stderr)
+                    print("REFUSED: to rebuild the mount from the configured source, re-run with", file=sys.stderr)
+                    print("REFUSED:   -e bind_mounts_force_remount=true", file=sys.stderr)
+                    spec = ",".join('/' + subpath(l) for l in bad)
+                    print("REFUSED: force accepts a layer the playbook cannot prove only when", file=sys.stderr)
+                    print("REFUSED: its path is named explicitly:", file=sys.stderr)
+                    print(f"REFUSED:   -e bind_mounts_force_allow_prefixes={spec}", file=sys.stderr)
+                    print(f"REFUSED: to clear it by hand, with the machine stopped:", file=sys.stderr)
+                    print(f"REFUSED:   sudo umount {tgt}", file=sys.stderr)
                     sys.exit(3)
                 subprocess.run(["umount", tgt], check=True)
             if mount_lines():
-                print(f"FOREIGN: {tgt} still stacked after 10 umounts; aborting", file=sys.stderr)
+                print(f"REFUSED: {tgt} is still stacked after 10 attempts; stopping", file=sys.stderr)
                 sys.exit(3)
             why = "collapsed stack" if matched else ("proven ours by ledger" if ours else "forced by user")
             print(f"REMEDIATED: stale bind at {tgt} cleared ({why}); re-binding from {src}")
@@ -716,6 +802,7 @@
           - "{{ item.target }}"
           - "{{ bind_mounts_force_remount | default(false) | bool | string | lower }}"
           - "{{ share_root_resolved }}"
+          - "{{ bind_mounts_force_allow_prefixes | default([]) | to_json }}"
       loop: "{{ all_mounts }}"
       loop_control:
         extended: true
@@ -723,7 +810,7 @@
       register: host_bind_probe
       changed_when: false
       check_mode: false
-      failed_when: host_bind_probe.rc != 0 and host_bind_probe.rc != 10 and host_bind_probe.rc != 4
+      failed_when: host_bind_probe.rc not in [0, 3, 4, 10]
       when: config.mode == 'bind'
       tags: [mounts, verify]
 
@@ -739,17 +826,117 @@
         - item.rc is defined and item.rc == 4
       tags: [mounts, verify]
 
-    - name: ACTION REQUIRED stale mounts need a stopped machine
-      ansible.builtin.fail:
-        msg: >-
-          {{ stale_needing_stop | unique | length }} machine(s) are running with
-          stale mounts that cannot be replaced while running (libkrun pins the
-          old bind): {{ stale_needing_stop | unique | join(', ') }}. For each
-          machine listed, run: smolvm machine stop --name <machine-name>; then
-          re-run this playbook — the stale bind is remediated while the machine
-          is stopped. Nothing else was changed by this run.
+    - name: >-
+        ACTION REQUIRED: stale mounts need a stopped machine
+      ansible.builtin.debug:
+        msg:
+          - "{{ '%-70s' | format('=' * 69) }}"
+          - "{{ '%-70s' | format('  Machine(s) whose stale mounts need the machine stopped:') }}" 
+          - "{{ '%-70s' | format('') }}"
+          - "{{ '%-70s' | format(('    ' ~ (stale_needing_stop | unique | join(', ')))[:70]) }}"
+          - "{{ '%-70s' | format('') }}"
+          - "{{ '%-70s' | format('  The machine is running, and the playbook cannot replace') }}" 
+          - "{{ '%-70s' | format('  these mounts while it runs. Stop each machine above,') }}" 
+          - "{{ '%-70s' | format('  then re-run this playbook:') }}" 
+          - "{{ '%-70s' | format('') }}"
+          - "{{ '%-70s' | format('      smolvm machine stop --name <machine-name>') }}"
+          - "{{ '%-70s' | format('') }}"
+          - "{{ '%-70s' | format('  Nothing else was changed by this run.') }}"
+          - "{{ '%-70s' | format('=' * 69) }}"
       when: stale_needing_stop | default([]) | length > 0
       tags: [mounts, verify]
+
+    - name: Stop because stale mounts need a stopped machine
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: stop the machine(s) listed in the box above, then re-run."
+      when: stale_needing_stop | default([]) | length > 0
+      tags: [mounts, verify]
+    - name: >-
+        ACTION REQUIRED: stacked host binds the playbook will not change
+      vars:
+        probe_umount_commands: >-
+          {%- set c = [] -%}
+          {%- for r in host_bind_probe.results -%}
+          {%- if r.rc is defined and r.rc == 3 -%}
+          {%- set _ = c.append('%-70s' | format('      sudo umount ' ~ config.share_root ~ '/' ~ r.item.name)) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ c }}
+        probe_refused_detail: >-
+          {%- set out = [] -%}
+          {%- for r in host_bind_probe.results -%}
+          {%- if r.rc is defined and r.rc == 3 -%}
+          {%- set stack_path = config.share_root ~ '/' ~ r.item.name -%}
+          {%- set _ = out.append('%-70s' | format('  ' ~ r.item.machine ~ ':')) -%}
+          {%- set _ = out.append('%-70s' | format('')) -%}
+          {%- set _ = out.append('%-70s' | format('    the layers below all sit on this mountpoint:')) -%}
+          {%- set _ = out.append('%-70s' | format('')) -%}
+          {%- set _ = out.append('%-70s' | format('      ' ~ stack_path)) -%}
+          {%- set _ = out.append('%-70s' | format('')) -%}
+          {%- set _ = out.append('%-70s' | format('    what each layer is, bottom first (the last one is on top):')) -%}
+          {%- set _ = out.append('%-70s' | format('')) -%}
+          {%- for line in r.stdout_lines | default([]) if line.startswith('LAYER-SRC: ') -%}
+          {%- set _ = out.append('%-70s' | format('      ' ~ line[11:])) -%}
+          {%- set _ = out.append('%-70s' | format('')) -%}
+          {%- endfor -%}
+          {%- set allows = [] -%}
+          {%- for line in r.stdout_lines | default([]) if line.startswith('ALLOW-PREFIX: ') -%}
+          {%- set _ = allows.append(line[14:].strip()) -%}
+          {%- endfor -%}
+          {%- if allows | length > 0 -%}
+          {%- set _ = out.append('%-70s' | format('    a layer marked (not ours) is not the playbook\'s own;')) -%}
+          {%- set _ = out.append('%-70s' | format('    accept it explicitly, one path per layer, for example:')) -%}
+          {%- set _ = out.append('%-70s' | format('')) -%}
+          {%- set _ = out.append('%-70s' | format('        -e bind_mounts_force_allow_prefixes=' ~ (allows | join(',')))) -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['%-70s' | format('=' * 69),
+              '%-70s' | format('  Stacked host bind(s) the playbook will not change.')]
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('  A stack is more than one mount at the same path. The'),
+                '%-70s' | format('  ledger does not prove this playbook created the top'),
+                '%-70s' | format('  layer(s) at the paths below, and nothing there was'),
+                '%-70s' | format('  mounted, unmounted or changed by this run.')]
+             + ['%-70s' | format('')]
+             + probe_refused_detail
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('  Pick 1 to clear the whole stack, 2 to see each layer first.')]
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('  Option 1 - let the playbook rebuild the bind in one run:')]
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('      Add this to the command you just ran, then run it again:')]
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('          -e bind_mounts_force_remount=true')]
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('      That unmounts the accepted layers and creates the bind'),
+                '%-70s' | format('      again from the directory marked (configured source).')]
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('  Option 2 - remove the layers yourself, one layer at a time:')]
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('      These layers all sit on the one mountpoint above. With'),
+                '%-70s' | format('      the machine stopped, run the command below once to'),
+                '%-70s' | format('      remove the topmost layer, then run the same command'),
+                '%-70s' | format('      again to remove the next one down:')]
+             + ['%-70s' | format('')]
+             + probe_umount_commands
+             + ['%-70s' | format('')]
+             + ['%-70s' | format('      When every layer is gone, run this playbook again: it'),
+                '%-70s' | format('      rebuilds the bind from the directory marked'),
+                '%-70s' | format('      (configured source).'),
+                '%-70s' | format('=' * 69)] }}
+      when: host_bind_probe.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 3) | list | length > 0
+      tags: [mounts, verify]
+
+    - name: Stop because a host bind stack is not proven ours
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: stack(s) the playbook will not change; see the box above."
+      when: host_bind_probe.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 3) | list | length > 0
+      tags: [mounts, verify]
+
 
     - name: Compute per-mount readonly drift
       ansible.builtin.set_fact:
@@ -1561,12 +1748,9 @@
         - not ansible_check_mode
       tags: [mounts]
 
-    - name: Fail with guidance when a machine is stopped but mounts were requested
-      ansible.builtin.fail:
-        msg: >-
-          Machine '{{ m.name }}' is stopped; guest bind mounts need a running
-          machine. Run: ansible-playbook bind-mounts.yml --tags start -K, then
-          re-run this playbook.
+    - name: Collect stopped machines that still need guest bind mounts
+      ansible.builtin.set_fact:
+        mounts_needing_start: "{{ mounts_needing_start | default([]) + [m.name] }}"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -1575,6 +1759,26 @@
         - config.mode == 'bind'
         - m.mounts | length > 0
         - smolvm_sections[m.name].state != 'running'
+      tags: [mounts]
+
+    - name: >-
+        ACTION REQUIRED: guest bind mounts need a running machine
+      ansible.builtin.debug:
+        msg:
+          - "{{ '=' * 70 }}"
+          - "{{ '%-70s' | format('  Machine(s) stopped while guest bind mounts were requested:') }}"
+          - "{{ '%-70s' | format(('    ' ~ (mounts_needing_start | join(', ')))[:70]) }}"
+          - "{{ '%-70s' | format('  Guest binds need a running machine; nothing was mounted for them.') }}"
+          - "{{ '%-70s' | format('  Run: ansible-playbook bind-mounts.yml --tags start -K') }}"
+          - "{{ '%-70s' | format('  then re-run this playbook.') }}"
+          - "{{ '=' * 70 }}"
+      when: mounts_needing_start | default([]) | length > 0
+      tags: [mounts]
+
+    - name: Stop because guest bind mounts need a running machine
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: start the machine(s) listed in the box above, then re-run."
+      when: mounts_needing_start | default([]) | length > 0
       tags: [mounts]
 
     - name: Note that bind mode is inactive (direct mode)
