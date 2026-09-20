@@ -11,13 +11,15 @@
 #            ONE volume slot per machine no matter how many directories are
 #            shared.
 #   direct - every mount becomes its own smolvm volume. Subject to the volume
-#            ceiling (max_volumes); switching modes is a config flip plus
-#            `ansible-playbook bind-mounts.yml --tags attach`.
+#            ceiling (max_volumes); switching modes is a config flip plus a
+#            default run (or `--tags attach` for step-by-step control). The
+#            partial tags refuse a pending volume change instead of applying it.
 mode: bind
 
 # Host directory holding one subdirectory per mount. Also stores the
 # playbook's provenance ledger (.bind-mounts-state.yml). Required in both
-# modes.
+# modes. The ledger is rewritten whenever a run changes a machine's volume
+# set, so a run that stops early still records what it attached.
 share_root: /home/you/share
 
 # Guest path at which share_root is mounted (bind mode).

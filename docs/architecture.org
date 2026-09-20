@@ -6,9 +6,11 @@ mode, and the volume ceiling. It is untracked; the checked-in example is
 vars.yml.example.
 *** The playbook
 bind-mounts.yml validates the configuration, gathers real state from findmnt
-and smolvm machine ls, plans a volume diff, converges stopped machines,
-halts before any mutation when a running machine needs volume changes,
-applies the rest, verifies the result, and rewrites the ledger. Every run
+and smolvm machine ls, plans a volume diff, converges stopped machines on a
+default run or with --tags attach, halts before any mutation when a running
+machine needs volume changes or this selection cannot apply them, applies
+the rest, records each applied volume change in the ledger, verifies the
+result, and rewrites the ledger. Every run
 accepts -e limit_machines=name1[,name2...] to scope it to the named
 machines only; ledger entries of scoped-out machines are carried forward
 unchanged.
@@ -110,14 +112,29 @@ machines:
       bash_profile_block: true
 #+END_SRC
 *** First-run adoption verifies and records matching mounts
+A volume the configuration does not want at a target it names is left
+alone while the ledger is unreadable, and refused once the ledger is
+usable and cannot prove it; a volume where the configuration wants a
+different one is refused whether or not the ledger is readable.
+*** Ledger writes are not only final
+The volume fields are rewritten by temp file and rename whenever a
+machine's volume set changes, so a run that stops before its final ledger
+write still records what it attached.
 *** Stale entries are unmounted, pruned, and removed from the volume set
 Guest binds are unmounted deep first, host binds are unmounted, empty
 subdirectories are pruned, and volumes are removed with machine update.
 *** Foreign state is never touched
-Anything not in the ledger is left alone. A foreign mount sitting at a
-wanted target fails the run with instructions.
+Anything not in the ledger is left alone, except a volume the
+configuration does not want at a target it names: with a usable ledger
+that is refused with instructions and the exact removal command, and
+-e bind_mounts_force_remount=true accepts its removal. A foreign mount
+sitting at a wanted target fails the run whether or not the ledger is
+readable.
 *** An unreadable ledger disables cleanup for that run
-Nothing managed is removed until the ledger is fixed or deleted.
+Nothing managed is removed until the ledger is fixed or deleted, and the
+volume refusal is suspended for that run: without proof the run leaves
+volumes at configured targets alone. A run that applies a volume change
+writes the volume facts it recorded.
 ** Security model
 The login hook must run as root inside the guest. A NOPASSWD sudoers rule
 that points at a script inside the shared volume is equivalent to full root,
@@ -149,13 +166,18 @@ subdirectory are detected through the per-layer findmnt listing;
 remediation umounts top-down with an ownership check on every layer,
 hard-capped at 10 layers, and verify enforces exactly one layer after a
 successful run. A layer the playbook cannot prove it created is never
-removed, even with force.
+removed, even with force. A volume at a target the configuration names is
+refused the same way, and a guest-side umount is skipped when the target
+carries a volume: the guest cannot tell a volume mount from a bind, so the
+run reports the volume and the host-side recovery instead.
 *** Stale binds are unmounted, pruned, and never force-deleted
 Ledger-stale host binds carry their owning machine. A proven-stale bind on
 a running machine is collected into the ACTION REQUIRED summary instead of
 being unmounted; the umount runs only for stopped machines, where libkrun
 cannot hold the bind. Guest binds are unmounted deep first; host bind
-targets are unmounted and removed only when empty.
+targets are unmounted and removed only when empty. A guest-bind target
+that now carries a volume is left in place and reported: nothing survives a
+stop there, so there is no bind left to unmount.
 *** Wrong source or readonly drift at a target is caught by device:inode and options comparison
 Host and guest identity checks compare the target's device and inode
 against the configured source, and both verify tasks also compare the
@@ -174,7 +196,10 @@ the machine stops.
 Guest mount collection and guest binds require running machines. Volume
 changes require stopped machines: the default run converges stopped
 machines by itself and halts with an ACTION REQUIRED message when a
-running machine needs volume changes; the attach tag refuses them.
+running machine needs volume changes; the attach tag refuses them. Only the
+default run and --tags attach converge a volume set (teardown removes the
+volumes the ledger records); a partial selection (mounts, install, verify,
+start) refuses a stopped machine whose volume change is pending.
 *** Non-root exec user fails the install phase
 *** Missing guest user or home directory fails the install phase
 The install preflight checks that the configured user exists inside the
@@ -182,6 +207,8 @@ guest and that the profile directory is present; either missing fails the
 run with plain guidance (create the user and home, or point profile_path
 at an existing directory) instead of a helper traceback.
 *** Exceeded volume budget fails with counts and the issue link
+A volume the ledger cannot prove at a configured target stops the run
+before the budget check.
 *** Missing or non-directory sources fail before any mutation
 *** Corrupt sudoers content is rejected before activation
 *** Check mode skips every mutating task

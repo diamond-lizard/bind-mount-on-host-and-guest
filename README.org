@@ -14,9 +14,10 @@ The playbook manages any number of machines and users from the same
 file, is safe to re-run in any state reachable through normal playbook
 operation, and never touches a mount or volume it cannot prove it
 created. Unusual states are refused, not auto-fixed: a mount whose
-content does not match the configuration, or stack layers whose
-ownership the ledger cannot prove, halt the run with instructions
-instead of being modified.
+content does not match the configuration, a volume at a target the
+configuration names whose ownership the ledger cannot prove, or stack
+layers whose ownership the ledger cannot prove, halt the run with
+instructions instead of being modified.
 
 Two modes are supported. In bind mode the playbook consolidates every
 configured directory under one share directory (share_root), attaches that
@@ -91,7 +92,8 @@ target directories are never removed and no data is deleted in either
 mode. Whether the guest can stay running depends on the mode.
 **** Bind mode: the guest can stay running
 The run unmounts everything the ledger proves it created: the host-side
-bind, the emptied share subdirectory, and the guest-side bind.
+bind, the emptied share subdirectory, and the guest-side bind, except a
+target that carries a volume, which the guest side never unmounts.
 **** Direct mode: the guest must be stopped; the volume itself is removed
 *** Manage a subset of machines
 Every run accepts -e limit_machines=name1[,name2...] to scope it to the
@@ -189,24 +191,32 @@ stopped; a running machine that needs volume changes halts the run with an
 ACTION REQUIRED message naming the machine and the command to run.
 *** mounts
 Host binds and guest binds only. Refuses stopped machines, because guest
-binds need a running guest.
+binds need a running guest. Does not change the volume set: a pending
+volume change stops the run and names the default run or --tags attach.
 *** install
 Preflights the guest user and home directory, then refreshes the guest
 script, the sudoers drop-in, and the profile hook. Needs running machines,
 a root exec user, and the configured user with an existing home directory
-inside the guest.
+inside the guest. Does not change the volume set.
 *** start starts stopped machines and waits for exec readiness
+Does not change the volume set: converge with the default run or --tags
+attach first if a volume change is pending.
 *** verify checks every mount read-only after the run
+Does not change the volume set.
 *** attach converges the volume set; machines must be stopped
 The default run already converges stopped machines automatically, so attach
-is only needed for explicit, step-by-step control.
+is only needed for explicit, step-by-step control. It is also the way to
+converge after a partial run (mounts, install, verify, start), which never
+changes the volume set.
 *** stop syncs each guest and stops the machines
 Tolerates machines that are already stopped.
 *** teardown undoes everything the playbook created
 Direct-mode volume removal requires stopped machines.
 
 attach, stop, and teardown are excluded from the default run; select them
-explicitly with --tags.
+explicitly with --tags. Only the default run and --tags attach converge a
+machine's volume set (teardown removes the volumes the ledger records); the
+partial tags refuse a pending volume change instead of applying it.
 ** Mode switching
 *** 1 Stop the machines
 #+BEGIN_SRC
@@ -223,24 +233,34 @@ The run converges the volume set on the stopped machines and starts them
 again. Bind to direct: every mount becomes a volume, the share volume is
 removed, and the guest-side login hook, sudoers rule, and installed script
 are removed. Direct to bind: the share volume is attached and former mount
-volumes are removed. Only volumes the ledger proves the playbook created are
-ever removed; hand-attached volumes, such as a persistent home directory, are
-untouched but still count against max_volumes.
+volumes are removed. Only volumes the ledger proves the playbook created
+are ever removed. A volume the configuration does not want at a target it
+names, and which the ledger cannot prove, halts the run with instructions
+and the exact removal command while the ledger is usable. Hand-attached
+volumes elsewhere, such as a persistent home directory, are untouched and
+still count against max_volumes.
 
 For step-by-step control you can still converge explicitly with --tags
 attach after stopping, and start the machines with --tags start.
 ** Safety model
 *** The provenance ledger records everything the playbook creates
 The ledger lives beside the share subdirectories and records volumes, host
-binds, guest binds, and installed artifacts per machine. Entries that are in
-the ledger and in the configuration are maintained; entries in the ledger but
-no longer in the configuration are removed; anything else is foreign and
-never touched. On the first run, existing mounts that match the
+binds, guest binds, and installed artifacts per machine. Its volume record
+is written again as soon as a run applies a volume change, so a run that
+fails before the final ledger write still describes the volumes that are
+attached. Entries that are in the ledger and in the configuration are
+maintained; entries in the ledger but no longer in the configuration are
+removed; anything else is foreign and never touched, except a volume the
+configuration does not want at a target it names, which is refused while
+the ledger is usable. On the first run, existing mounts that match the
 configuration are verified and adopted into the ledger.
 *** Foreign mounts are refused, never unmounted automatically
 A target already mounted with different content than the configured source
 fails the run with the found and expected device:inode identities printed,
-together with the manual resolution path.
+together with the manual resolution path. A volume the configuration does
+not want at a target it names, which the ledger cannot prove, is refused
+the same way while the ledger is usable; -e bind_mounts_force_remount=true
+accepts removing and replacing it, with the machine stopped.
 *** Idempotency compares device and inode, not just mount presence
 Every check compares the device and inode of the mounted target against the
 configured source, so a stale or wrong-source mount is caught instead of
@@ -261,9 +281,11 @@ The drop-in is validated with visudo before activation. The rule authorizes
 only the root-owned copy at /usr/local/sbin, so nothing under the
 user-writable share can run with NOPASSWD root privileges.
 *** Writes are atomic and preserve ownership and mode
-Ledger and profile edits go through a temp file and rename. The profile
-helper preserves the file owner and mode and never touches lines outside the
-managed block, which uses the standard blockinfile markers.
+Ledger and profile edits go through a temp file and rename, and the volume
+record a run writes after a volume change goes to the ledger the same way,
+so a reader never sees a partial file. The profile helper preserves the
+file owner and mode and never touches lines outside the managed block,
+which uses the standard blockinfile markers.
 *** Check mode skips every mutating task and still verifies
 ** Shutdown semantics
 smolvm machine stop is graceful: the guest agent runs a full sync, flushing
@@ -276,7 +298,9 @@ The stop tag adds a redundant guest sync before stopping as belt-and-braces.
 *** Bind mode
 One share volume per machine; each configured directory is bind-mounted
 into the share root on the host and from the share to its target path
-inside the guest.
+inside the guest. A guest-side umount is skipped when the target carries a
+volume: the guest cannot tell a volume mount from a bind, and the mount at
+that target is smolvm's own.
 *** Direct mode
 Each configured directory is attached as its own smolvm volume, with no
 share volume and no guest-side artifacts.
@@ -290,19 +314,23 @@ The user as whom smolvm machine exec runs commands inside a guest.
 Management operations require it to be root.
 *** Foreign state
 Any mount, volume, or file the ledger cannot prove the playbook created.
-Refused or ignored, never removed.
+Ignored when nothing depends on it; refused when it sits where the
+configuration wants a different mount or volume. Never removed unless
+-e bind_mounts_force_remount=true accepts it.
 *** Force remount
-Replacing a bind whose ownership the ledger cannot prove, authorized by
-re-running with -e bind_mounts_force_remount=true; the refusal message
-lists every affected mount before anything is forced.
+Replacing a bind, or an attached volume at a target the configuration
+names, whose ownership the ledger cannot prove, authorized by re-running
+with -e bind_mounts_force_remount=true; the refusal message lists every
+affected mount and volume before anything is forced. A foreign guest-side
+mount is not covered: the run prints the exact umount command instead.
 *** Guest bind: a bind mount from the share path to the target path
 *** Guest-side share path: share_target followed by the mount name
 *** Host bind: a bind mount from a source directory to its share subdirectory
 *** Ledger
 The file .bind-mounts-state.yml inside the share root. It records
-everything the playbook created, is written at the end of a successful
-run, and is read at the start of the next; it is the basis of provenance
-and stale-element cleanup.
+everything the playbook created, is read at the start of a run, and is
+written again whenever a volume change is applied and at the end of a
+successful run; it is the basis of provenance and stale-element cleanup.
 *** Login hook
 The managed block in the machine user's .bash_profile that re-applies
 the guest binds at every login through passwordless sudo.
@@ -319,23 +347,32 @@ A proven-stale bind is unmounted and re-bound from the configured source
 while the machine is stopped; a running machine halts the run with an
 ACTION REQUIRED message first (libkrun pins the old bind). When the ledger
 cannot prove the bind is ours, the run halts and lists every affected host
-and guest path; re-run with -e bind_mounts_force_remount=true to accept,
-or unmount manually.
+and guest path; re-run with -e bind_mounts_force_remount=true to accept, or
+unmount manually. A volume the configuration does not want at a target it
+names, which the ledger cannot prove, is refused the same way while the
+ledger is usable; a guest mount whose target carries a volume is not
+unmounted, and the run prints the volume and the host-side recovery
+instead.
 *** After a host reboot a standalone start mounts nothing
 Host binds are runtime state and do not survive reboots, so the share
 subdirectories are empty and the guest scripts refuse to bind from them.
 Run the playbook: it re-creates the host binds and the guest mounts.
 *** Refused volume changes mean stop, then re-run
-The playbook never stops a machine with live sessions on its own. Re-run
-after stopping: the run attaches the volume, starts the machine, and
-finishes the rest.
+The playbook never stops a machine with live sessions on its own. After
+stopping, re-run the default playbook (no --tags): it applies the volume
+changes, starts the machine, and finishes the rest. For step-by-step
+control, run --tags attach first, then --tags start.
 *** An exceeded volume budget counts hand-attached volumes too
 Remove mounts from vars.yml, or raise max_volumes only if you know the
 machine has headroom; see smolvm issue
 [[https://github.com/smol-machines/smolvm/issues/941][#941]].
 *** An unreadable ledger disables cleanup for that run
-Fix or delete the ledger file; deleting it loses only the cleanup
-bookkeeping.
+Fix or delete the ledger file; deleting it loses the cleanup bookkeeping,
+and with no proof at all a volume the configuration does not want at a
+target it names is left alone instead of refused. While the file exists
+and is unreadable nothing is written either, so fix or delete it, then
+re-run to record the volumes a run changes. With the file gone, a run
+that applies a volume change writes the volume facts it recorded.
 *** The smolvm exec user must be root for the playbook to manage a guest
 **** Context
 The playbook reaches a guest only through smolvm machine exec, which runs

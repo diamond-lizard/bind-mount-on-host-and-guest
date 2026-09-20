@@ -6,6 +6,9 @@
 #   ansible-playbook bind-mounts.yml -i inventory --tags attach -K   (volume convergence)
 #   ansible-playbook bind-mounts.yml -i inventory --tags stop -K     (graceful stop)
 #   ansible-playbook bind-mounts.yml -i inventory --tags teardown -K (undo playbook-created state)
+# Only the default run and --tags attach converge a machine's volume set
+# (teardown removes the volumes the ledger records); the partial tags
+# (mounts, install, verify, start) refuse a pending change.
 # Add -e limit_machines=name1[,name2...] to scope any run to those machines only.
 - name: Manage smolvm share bind mounts (host and guests)
   hosts: localhost
@@ -326,11 +329,12 @@
           {%- set _ = managed.append({'src': v.src, 'target': v.target}) -%}
           {%- endfor -%}
           {%- set stale_managed = managed | rejectattr('target', 'in', desired_targets) | list -%}
+          {%- set stale_managed = stale_managed | selectattr('target', 'in', observed_targets) | list -%}
           {%- set stale_targets = stale_managed | map(attribute='target') | list -%}
-          {%- set external = observed | rejectattr('target', 'in', desired_targets + stale_targets) | list -%}
           {%- set adds = [] -%}
           {%- set removes = [] -%}
           {%- set foreign = [] -%}
+          {%- set refused_targets = [] -%}
           {%- set managed_resolved = [] -%}
           {%- for e in managed -%}
           {%- set _ = managed_resolved.append({'src': e.src | realpath, 'target': e.target}) -%}
@@ -356,8 +360,27 @@
           {%- endif -%}
           {%- endfor -%}
           {%- for v in stale_managed -%}
-          {%- set _ = removes.append('--remove-volume=' ~ v.src ~ ':' ~ v.target) -%}
+          {%- set obs_at = observed | selectattr('target', 'eq', v.target) | first | default(none) -%}
+          {%- set remove_src = obs_at.src if obs_at is not none else v.src -%}
+          {%- set _ = removes.append('--remove-volume=' ~ remove_src ~ ':' ~ v.target) -%}
           {%- endfor -%}
+          {%- set configured_targets = all_mounts | selectattr('machine', 'eq', m.name) | map(attribute='target') | list -%}
+          {%- if ledger_usable | bool -%}
+          {%- for ov in observed -%}
+          {%- set ov_proven = (managed_resolved | selectattr('src', 'eq', ov.src | realpath) | selectattr('target', 'eq', ov.target) | list | length) > 0 -%}
+          {%- if ov.target in configured_targets and ov.target not in desired_targets and ov.target not in stale_targets and not ov_proven -%}
+          {%- set _ = refused_targets.append(ov.target) -%}
+          {%- if force -%}
+          {%- set _ = removes.append('--remove-volume=' ~ ov.src ~ ':' ~ ov.target) -%}
+          {%- else -%}
+          {%- set _ = foreign.append('%-70s' | format(('    ' ~ m.name ~ ': ' ~ ov.target)[:70])) -%}
+          {%- set _ = foreign.append('%-70s' | format(('      observed:   ' ~ ov.src)[:70])) -%}
+          {%- set _ = foreign.append('%-70s' | format('      ledger:     no volume recorded at this target')) -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {%- set external = observed | rejectattr('target', 'in', desired_targets + stale_targets + refused_targets) | list -%}
           {%- set _ = result.update({m.name: {
                 'add': adds,
                 'remove': removes,
@@ -380,13 +403,23 @@
       ansible.builtin.debug:
         msg: >-
           {{ ['=' * 70,
-              '%-70s' | format('  Volume(s) at configured targets without ledger proof:')]
+              '%-70s' | format('  Volume(s) at configured targets without ledger proof:'),
+              '%-70s' | format('')]
              + volume_plan_foreign
-             + ['%-70s' | format('  The ledger does not prove this playbook created them, so they'),
-                '%-70s' | format('  would be removed and replaced. To accept the replacement,'),
-                '%-70s' | format('  re-run with: -e bind_mounts_force_remount=true'),
-                '%-70s' | format('  To keep the volume(s), remove them manually first:'),
+             + ['%-70s' | format(''),
+                '%-70s' | format('  The ledger does not prove this playbook created them. Volume'),
+                '%-70s' | format('  changes need a stopped machine: stop the machine(s) above'),
+                '%-70s' | format('  first, then re-run the default playbook (or --tags attach)'),
+                '%-70s' | format('  with:'),
+                '%-70s' | format(''),
+                '%-70s' | format('      -e bind_mounts_force_remount=true'),
+                '%-70s' | format(''),
+                '%-70s' | format('  A forced volume is detached, and replaced where the'),
+                '%-70s' | format('  configuration wants one. To deal with it yourself instead,'),
+                '%-70s' | format('  stop the machine(s) and run:'),
+                '%-70s' | format(''),
                 '%-70s' | format('  smolvm machine update --name <machine> --remove-volume=<src>:<tgt>'),
+                '%-70s' | format(''),
                 '%-70s' | format('  Nothing else was changed by this run.'),
                 '=' * 70] }}
       when:
@@ -426,8 +459,9 @@
           - "{{ '%-70s' | format('  Volume changes require a stopped machine.') }}"
           - "{{ '%-70s' | format('  For each machine listed above, run:') }}"
           - "{{ '%-70s' | format('      smolvm machine stop --name <machine-name>') }}"
-          - "{{ '%-70s' | format('  Then re-run this playbook: it will apply the volume changes, start') }}"
-          - "{{ '%-70s' | format('  the machines, and finish the rest.') }}"
+          - "{{ '%-70s' | format('  Then re-run the default playbook (no --tags): it applies the') }}"
+          - "{{ '%-70s' | format('  volume changes, starts the machines, and finishes the rest.') }}"
+          - "{{ '%-70s' | format('  For step-by-step control: --tags attach, then --tags start.') }}"
           - "{{ '%-70s' | format('  Nothing else was changed by this run.') }}"
           - "{{ '=' * 70 }}"
       when: volume_changes_blocked | default([]) | length > 0
@@ -435,8 +469,51 @@
 
     - name: Stop because volume changes are pending on running machines
       ansible.builtin.fail:
-        msg: "ACTION REQUIRED: stop the machine(s) listed in the box above, then re-run this playbook."
+        msg: "ACTION REQUIRED: stop the machine(s) listed in the box above, then re-run the default playbook (no --tags)."
       when: volume_changes_blocked | default([]) | length > 0
+      tags: [always]
+
+    - name: Collect stopped machines whose volume changes this selection cannot apply
+      ansible.builtin.set_fact:
+        volume_changes_partial: "{{ volume_changes_partial | default([]) + [m.name] }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      when:
+        - (volume_plans[m.name].add + volume_plans[m.name].remove) | length > 0
+        - smolvm_sections[m.name].state != 'running'
+        - ansible_run_tags | intersect(['mounts', 'install', 'verify', 'start']) | length > 0
+        - ansible_run_tags | intersect(['all', 'attach']) | length == 0
+      tags: [always]
+
+    - name: >-
+        ACTION REQUIRED: volume changes are pending, but this selection does not apply them
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['=' * 70,
+              '%-70s' | format('  Volume change(s) are pending on stopped machine(s):'),
+              '%-70s' | format(''),
+              '%-70s' | format(('    ' ~ (volume_changes_partial | join(', ')))[:70]),
+              '%-70s' | format(''),
+              '%-70s' | format('  This selection does not converge the volume set. Run the'),
+              '%-70s' | format('  default playbook (no --tags): it applies the volume changes,'),
+              '%-70s' | format('  starts the machines, and finishes the rest. Or converge with'),
+              '%-70s' | format('  --tags attach, then start with --tags start.'),
+              '%-70s' | format('')]
+             + (['%-70s' | format('  Check mode: no volume change was applied or would be.')]
+                if ansible_check_mode
+                else ['%-70s' | format('  Nothing else was changed by this run.')])
+             + ['=' * 70] }}
+      when: volume_changes_partial | default([]) | length > 0
+      tags: [always]
+
+    - name: Stop because this selection cannot converge pending volume changes
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: volume changes are pending and --tags {{ ansible_run_tags | join(',') }} does not apply them; see the box above."
+      when:
+        - volume_changes_partial | default([]) | length > 0
+        - not ansible_check_mode
       tags: [always]
 
     - name: Enforce the volume budget before the default-run attach
@@ -458,7 +535,7 @@
       when:
         - (volume_plans[m.name].add + volume_plans[m.name].remove) | length > 0
         - smolvm_sections[m.name].state == 'stopped'
-        - ansible_run_tags | intersect(['all', 'mounts', 'install', 'verify', 'start']) | length > 0
+        - ansible_run_tags | intersect(['all']) | length > 0
       tags: [always]
 
     - name: Apply volume changes to stopped machines (default run)
@@ -470,11 +547,22 @@
         loop_var: m
         label: "{{ m.name }}"
       register: default_volume_update
-      changed_when: default_volume_update.rc == 0
+      changed_when: default_volume_update.rc | default(1) | int == 0
+      failed_when: false
       when:
         - (volume_plans[m.name].add + volume_plans[m.name].remove) | length > 0
         - smolvm_sections[m.name].state == 'stopped'
-        - ansible_run_tags | intersect(['all', 'mounts', 'install', 'verify', 'start']) | length > 0
+        - ansible_run_tags | intersect(['all']) | length > 0
+        - not ansible_check_mode
+      tags: [always]
+
+    - name: Record the volumes the default run applied
+      ansible.builtin.include_tasks: tasks/record-volume-ledger.yml
+      vars:
+        volume_apply_results: "{{ default_volume_update }}"
+        volume_record_mode: converge
+      when:
+        - ansible_run_tags | intersect(['all']) | length > 0
         - not ansible_check_mode
       tags: [always]
     # ================================================================
@@ -1118,12 +1206,23 @@
         loop_var: m
         label: "{{ m.name }}"
       register: volume_update
-      changed_when: volume_update.rc == 0
+      changed_when: volume_update.rc | default(1) | int == 0
+      failed_when: false
       when:
         - (volume_plans[m.name].add + volume_plans[m.name].remove) | length > 0
+        - ansible_run_tags | intersect(['all']) | length == 0
         - not ansible_check_mode
       tags: [attach, never]
 
+    - name: Record the volumes the attach run applied
+      ansible.builtin.include_tasks: tasks/record-volume-ledger.yml
+      vars:
+        volume_apply_results: "{{ volume_update }}"
+        volume_record_mode: converge
+      when:
+        - ansible_run_tags | intersect(['all']) | length == 0
+        - not ansible_check_mode
+      tags: [attach, never]
     # ================================================================
     # 7. Install phase: bind mode installs the guest script, sudoers and profile hook;
     # direct mode removes them.
@@ -1584,10 +1683,7 @@
         - not ansible_check_mode
       tags: [mounts, verify]
 
-    - name: Unmount stale guest binds (ledger-managed, no longer in config)
-      # Runs BEFORE the fresh-mount task: a renamed or re-sourced mount makes
-      # the ledger's old guest-bind entry stale, and the fresh bind created by
-      # the mount task must not be torn down again afterwards.
+    - name: Split the stale guest binds by volume-carrying targets
       vars:
         current_targets: "{{ all_mounts | map(attribute='target') | list }}"
         stale_pairs: >-
@@ -1602,9 +1698,32 @@
           {%- endfor -%}
           {%- endfor -%}
           {{ out | sort(attribute='target') | reverse }}
+      ansible.builtin.set_fact:
+        # The host-side volume view (smolvm machine ls --verbose) is the only
+        # evidence there is: inside the guest a volume mount and a foreign bind
+        # are indistinguishable, and a stopped machine cannot hold the bind.
+        stale_guest_binds: >-
+          {%- set unmount = [] -%}
+          {%- set kept = [] -%}
+          {%- for p in stale_pairs -%}
+          {%- set at_target = smolvm_sections[p.machine].mounts | selectattr('target', 'eq', p.target) | list -%}
+          {%- if at_target | length > 0 -%}
+          {%- set _ = kept.append('%-70s' | format(('      ' ~ p.machine ~ ': ' ~ p.target)[:70])) -%}
+          {%- set _ = kept.append('%-70s' | format(('        volume:   ' ~ at_target[0].src)[:70])) -%}
+          {%- else -%}
+          {%- set _ = unmount.append(p) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ {'unmount': unmount, 'kept': kept} }}
+      tags: [mounts]
+
+    - name: Unmount stale guest binds (ledger-managed, no longer in config)
+      # Runs BEFORE the fresh-mount task: a renamed or re-sourced mount makes
+      # the ledger's old guest-bind entry stale, and the fresh bind created by
+      # the mount task must not be torn down again afterwards.
       ansible.builtin.command:
         argv: "{{ ['smolvm', 'machine', 'exec', '--name', pairs_item.machine, '--', 'umount', pairs_item.target] }}"
-      loop: "{{ stale_pairs }}"
+      loop: "{{ stale_guest_binds.unmount }}"
       loop_control:
         loop_var: pairs_item
         label: "{{ pairs_item.machine }}:{{ pairs_item.target }}"
@@ -1615,6 +1734,25 @@
         - config.mode == 'bind'
         - smolvm_sections[pairs_item.machine].state == 'running'
         - not ansible_check_mode
+      tags: [mounts]
+
+    - name: Note stale guest bind targets that now carry a volume
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['%-70s' | format('  Stale guest bind target(s) left in place (a volume is there now):'),
+              '%-70s' | format('')]
+             + (stale_guest_binds.kept | list)
+             + ['%-70s' | format(''),
+                '%-70s' | format('  No bind survives a stop at those targets, so nothing was unmounted'),
+                '%-70s' | format('  inside the guest. To detach the volume, stop the machine and run:'),
+                '%-70s' | format(''),
+                '%-70s' | format('      smolvm machine update --name <machine>'),
+                '%-70s' | format('          --remove-volume=<src>:<tgt>'),
+                '%-70s' | format(''),
+                '%-70s' | format('  Nothing else was changed by this run.')] }}
+      when:
+        - config.mode == 'bind'
+        - stale_guest_binds.kept | length > 0
       tags: [mounts]
 
     - name: Ensure and mount guest bind mounts
@@ -1673,12 +1811,15 @@
       ansible.builtin.debug:
         msg: >-
           {{ ['=' * 70,
-              '%-70s' | format('  Guest bind mount(s) the helper could not converge:')]
+              '%-70s' | format('  Guest bind mount(s) the helper could not converge:'),
+              '%-70s' | format('')]
              + guest_mount_failed
-             + ['%-70s' | format('  rc 4 means the share source was empty: the host-side bind is'),
+             + ['%-70s' | format(''),
+                '%-70s' | format('  rc 4 means the share source was empty: the host-side bind is'),
                 '%-70s' | format('  missing (typically after a host reboot - run the playbook on'),
                 '%-70s' | format('  the host first), or the configured source directory is empty.'),
                 '%-70s' | format('  Other rc values are helper errors; their stderr is above.'),
+                '%-70s' | format(''),
                 '%-70s' | format('  Nothing else was changed by this run.'),
                 '=' * 70] }}
       when: guest_mount_failed | default([]) | length > 0
@@ -1690,34 +1831,98 @@
       when: guest_mount_failed | default([]) | length > 0
       tags: [mounts]
 
-    - name: Fail on foreign guest mounts the ledger cannot prove
-      ansible.builtin.fail:
+    - name: Classify the guest binds the helper refused
+      ansible.builtin.set_fact:
+        guest_refused: >-
+          {%- set vol_targets = {} -%}
+          {%- for nm, sect in smolvm_sections.items() -%}
+          {%- set _ = vol_targets.update({nm: (sect.mounts | default([])) | map(attribute='target') | list}) -%}
+          {%- endfor -%}
+          {%- set lines = {'volume': [], 'unproven': []} -%}
+          {%- set mounts = {'volume': [], 'unproven': [], 'proven': []} -%}
+          {%- for r in guest_mount_result.results | default([]) -%}
+          {%- if r.rc is defined and r.rc == 3 -%}
+          {%- set proof = (ledger.machines | default({})).get(r.item.machine, {}).get('guest_binds', []) | selectattr('target', 'eq', r.item.target) | list | length -%}
+          {%- if r.item.target in (vol_targets[r.item.machine] | default([])) -%}
+          {%- set _ = mounts.volume.append(r.item) -%}
+          {%- set vol_src = smolvm_sections[r.item.machine].mounts | selectattr('target', 'eq', r.item.target) | map(attribute='src') | first -%}
+          {%- set _ = lines.volume.append('%-70s' | format(('    ' ~ r.item.machine ~ ': ' ~ r.item.target)[:70])) -%}
+          {%- set _ = lines.volume.append('%-70s' | format(('      volume:   ' ~ vol_src)[:70])) -%}
+          {%- elif proof == 0 -%}
+          {%- set _ = mounts.unproven.append(r.item) -%}
+          {%- set _ = lines.unproven.append('%-70s' | format(('    ' ~ r.item.machine ~ ': ' ~ r.item.target)[:70])) -%}
+          {%- set _ = lines.unproven.append('%-70s' | format(('      expected: ' ~ r.item.share_path)[:70])) -%}
+          {%- else -%}
+          {%- set _ = mounts.proven.append(r.item) -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ {'lines': lines, 'mounts': mounts} }}
+      tags: [mounts]
+
+    - name: >-
+        ACTION REQUIRED: guest mount(s) the ledger cannot prove
+      ansible.builtin.debug:
         msg: >-
-          {{ item.item.target }} is a mountpoint whose content differs from
-          {{ item.item.share_path }}, and the ledger has no guest-bind entry
-          proving it is ours. Unmount it manually via smolvm machine exec.
-      loop: "{{ guest_mount_result.results }}"
-      loop_control:
-        label: "{{ item.item.machine }}:{{ item.item.target }}"
-      when:
-        - item.rc is defined and item.rc == 3
-        - (ledger.machines | default({})).get(item.item.machine, {}).get('guest_binds', [])
-          | selectattr('target', 'eq', item.item.target) | list | length == 0
+          {{ ['=' * 70,
+              '%-70s' | format('  Guest mount(s) the ledger cannot prove:'),
+              '%-70s' | format('')]
+             + guest_refused.lines.unproven
+             + ['%-70s' | format(''),
+                '%-70s' | format('  Unmount each target in the guest, then re-run this playbook:'),
+                '%-70s' | format(''),
+                '%-70s' | format('      smolvm machine exec --name <machine> -- umount <target>'),
+                '%-70s' | format(''),
+                '%-70s' | format('  Nothing else was changed by this run.'),
+                '=' * 70] }}
+      when: guest_refused.lines.unproven | length > 0
+      tags: [mounts]
+
+    - name: >-
+        ACTION REQUIRED: guest bind target(s) that carry a machine volume
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['=' * 70,
+              '%-70s' | format('  Guest bind target(s) carrying an smolvm volume:'),
+              '%-70s' | format('')]
+             + guest_refused.lines.volume
+             + ['%-70s' | format(''),
+                '%-70s' | format('  The helper refused to bind over a volume, and this run did'),
+                '%-70s' | format('  not unmount anything inside the guest: smolvm would keep the'),
+                '%-70s' | format('  volume attached and the guest view would drift from the ledger.'),
+                '%-70s' | format('  Never umount these targets inside the guest.'),
+                '%-70s' | format(''),
+                '%-70s' | format('  Recovery, with the machine stopped (volume changes need one):'),
+                '%-70s' | format(''),
+                '%-70s' | format('      smolvm machine stop --name <machine-name>'),
+                '%-70s' | format('      smolvm machine update --name <machine>'),
+                '%-70s' | format('          --remove-volume=<src>:<tgt>'),
+                '%-70s' | format('      ansible-playbook bind-mounts.yml -i inventory -K'),
+                '%-70s' | format(''),
+                '%-70s' | format('  A target equal to config.share_target can never carry a bind:'),
+                '%-70s' | format('  change config.share_target, or drop that mount entry.'),
+                '%-70s' | format(''),
+                '%-70s' | format('  Nothing else was changed by this run.'),
+                '=' * 70] }}
+      when: guest_refused.lines.volume | length > 0
+      tags: [mounts]
+
+    - name: Stop because a guest mount is refused or not proven ours
+      ansible.builtin.fail:
+        msg: "ACTION REQUIRED: guest mount(s) need attention; see the box(es) above."
+      when: (guest_refused.lines.unproven | length) + (guest_refused.lines.volume | length) > 0
       tags: [mounts]
 
     - name: Unmount proven-own guest binds the helper refused
       ansible.builtin.command:
-        argv: "{{ ['smolvm', 'machine', 'exec', '--name', item.item.machine, '--', 'umount', item.item.target] }}"
-      loop: "{{ guest_mount_result.results }}"
+        argv: "{{ ['smolvm', 'machine', 'exec', '--name', item.machine, '--', 'umount', item.target] }}"
+      loop: "{{ guest_refused.mounts.proven }}"
       loop_control:
-        label: "{{ item.item.machine }}:{{ item.item.target }}"
+        label: "{{ item.machine }}:{{ item.target }}"
       register: guest_foreign_umount
       changed_when: guest_foreign_umount.rc == 0
       failed_when: false
-      when:
-        - item.rc is defined and item.rc == 3
-        - (ledger.machines | default({})).get(item.item.machine, {}).get('guest_binds', [])
-          | selectattr('target', 'eq', item.item.target) | list | length > 0
+      when: not ansible_check_mode
       tags: [mounts]
 
     - name: Re-mount guest binds after remediation
@@ -1736,7 +1941,7 @@
           - "{{ item.uid_eff | string }}"
           - "{{ item.gid_eff | string }}"
           - "{{ item.readonly | string | lower }}"
-      loop: "{{ guest_mount_result.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 3) | map(attribute='item') | list }}"
+      loop: "{{ guest_refused.mounts.proven }}"
       loop_control:
         label: "{{ item.machine }}:{{ item.target }}"
       register: guest_mount_retry
@@ -2104,9 +2309,19 @@
         loop_var: m
         label: "{{ m.name }}"
       register: teardown_volume_update
-      changed_when: teardown_volume_update.rc == 0
+      changed_when: teardown_volume_update.rc | default(1) | int == 0
+      failed_when: false
       when:
         - teardown_removals[m.name] | length > 0
+        - not ansible_check_mode
+      tags: [teardown, never]
+
+    - name: Record the volumes teardown removed
+      ansible.builtin.include_tasks: tasks/record-volume-ledger.yml
+      vars:
+        volume_apply_results: "{{ teardown_volume_update }}"
+        volume_record_mode: torn-down
+      when:
         - not ansible_check_mode
       tags: [teardown, never]
 
