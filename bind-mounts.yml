@@ -2452,12 +2452,15 @@
       ansible.builtin.debug:
         msg: >-
           {{ ['=' * 70,
-              '%-70s' | format('  Stopped machine(s) still carrying guest-side artifacts:')]
+              '%-70s' | format('  Stopped machine(s) still carrying guest-side artifacts:'),
+              '%-70s' | format('')]
              + teardown_pending_artifacts
-             + ['%-70s' | format('  Those removals need a running machine. Switch the machine to'),
+             + ['%-70s' | format(''),
+                '%-70s' | format('  Those removals need a running machine. Switch the machine to'),
                 '%-70s' | format('  direct mode and run the default playbook: the converging run'),
                 '%-70s' | format('  removes the bind-mode hook, sudoers rule and script. Then'),
                 '%-70s' | format('  re-run --tags teardown for the host-side residue.'),
+                '%-70s' | format(''),
                 '%-70s' | format('  Nothing else was changed by this run.'),
                 '=' * 70] }}
       when: teardown_pending_artifacts | default([]) | length > 0
