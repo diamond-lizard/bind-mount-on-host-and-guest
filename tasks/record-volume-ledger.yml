@@ -34,7 +34,7 @@
       {%- else -%}
       {%- set volumes = [] -%}
       {%- for mnt in all_mounts | selectattr('machine', 'eq', rec.name) -%}
-      {%- set _ = volumes.append({'src': mnt.src, 'target': mnt.target, 'readonly': mnt.readonly}) -%}
+      {%- set _ = volumes.append({'src': mnt.src | realpath, 'target': mnt.target, 'readonly': mnt.readonly}) -%}
       {%- endfor -%}
       {%- set fields = {'share_volume': config.mode == 'bind',
                         'volumes': volumes if config.mode == 'direct' else []} -%}

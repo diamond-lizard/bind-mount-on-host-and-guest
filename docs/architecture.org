@@ -144,6 +144,12 @@ machine's volume set changes, so a run that stops before its final ledger
 write still records what it attached. The bind fields are rewritten the same
 way at the mount sites, so a run that stops after unmounting a bind leaves
 the ledger without that claim.
+A recorded volume source is the canonical host path, because smolvm stores
+a volume under its resolved source while the configuration may name a
+symlink or another non-canonical path. A removal asks for the source the
+machine reports for that target while the volume is listed, and for the
+recorded source resolved otherwise, so a ledger written before this rule is
+still honored.
 *** Stale entries are unmounted, pruned, and removed from the volume set
 Guest binds are unmounted deep first, host binds are unmounted, empty
 subdirectories are pruned, and volumes are removed with machine update.

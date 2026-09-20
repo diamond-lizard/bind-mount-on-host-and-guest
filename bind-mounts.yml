@@ -378,7 +378,7 @@
           {%- set desired_targets = desired | map(attribute='target') | list -%}
           {%- set managed = [] -%}
           {%- if entry.get('share_volume', false) -%}
-          {%- set _ = managed.append({'src': config.share_root, 'target': config.share_target}) -%}
+          {%- set _ = managed.append({'src': share_root_resolved, 'target': config.share_target}) -%}
           {%- endif -%}
           {%- for v in entry.get('volumes', []) -%}
           {%- set _ = managed.append({'src': v.src, 'target': v.target}) -%}
@@ -2205,7 +2205,7 @@
           {%- set entry = (ledger.machines | default({})).get(m.name, {}) -%}
           {%- set volumes = [] -%}
           {%- for mnt in all_mounts | selectattr('machine', 'eq', m.name) -%}
-          {%- set _ = volumes.append({'src': mnt.src, 'target': mnt.target, 'readonly': mnt.readonly}) -%}
+          {%- set _ = volumes.append({'src': mnt.src | realpath, 'target': mnt.target, 'readonly': mnt.readonly}) -%}
           {%- endfor -%}
           {%- set _ = machines_out.update({m.name: {
                 'share_volume': config.mode == 'bind',
@@ -2381,11 +2381,16 @@
           {%- for m in normalized -%}
           {%- set entry = (ledger.machines | default({})).get(m.name, {}) -%}
           {%- set removals = [] -%}
+          {%- set mounted = smolvm_sections.get(m.name, {}).get('mounts', []) -%}
           {%- if entry.get('share_volume', false) -%}
-          {%- set _ = removals.append('--remove-volume=' ~ config.share_root ~ ':' ~ config.share_target) -%}
+          {%- set share_obs = mounted | selectattr('target', 'eq', config.share_target) | first | default(none) -%}
+          {%- set share_src = share_obs.src if share_obs is not none else share_root_resolved -%}
+          {%- set _ = removals.append('--remove-volume=' ~ share_src ~ ':' ~ config.share_target) -%}
           {%- endif -%}
           {%- for v in entry.get('volumes', []) -%}
-          {%- set _ = removals.append('--remove-volume=' ~ v.src ~ ':' ~ v.target) -%}
+          {%- set vol_obs = mounted | selectattr('target', 'eq', v.target) | first | default(none) -%}
+          {%- set vol_src = vol_obs.src if vol_obs is not none else (v.src | realpath) -%}
+          {%- set _ = removals.append('--remove-volume=' ~ vol_src ~ ':' ~ v.target) -%}
           {%- endfor -%}
           {%- set _ = result.update({m.name: removals}) -%}
           {%- endfor -%}

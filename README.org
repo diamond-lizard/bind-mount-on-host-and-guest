@@ -251,8 +251,9 @@ artifacts by kind, not by path, so changed installed_script_guest_path or
 sudoers_dropin_guest_path values leave a copy at the old path behind and
 untracked; the removals act only on the paths the current configuration
 names. Its volume record
-is written again as soon as a run applies a volume change, so a run that
-fails before the final ledger write still describes the volumes that are
+names each source as the canonical host path, and is written again as soon
+as a run applies a volume change, so a run that fails before the final
+ledger write still describes the volumes that are
 attached. A bind enters the ledger only as an observation: the host-bind
 probe found the target bound from that source, this run created the bind, or
 the guest mount helper reported the target bound from the share path. Each
