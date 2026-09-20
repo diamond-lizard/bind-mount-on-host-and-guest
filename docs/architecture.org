@@ -249,8 +249,11 @@ A volume the ledger cannot prove at a configured target stops the run
 before the budget check.
 *** Missing or non-directory sources fail before any mutation
 *** Corrupt sudoers content is rejected before activation
-*** Check mode skips every mutating task
-The host-side probes still run, but nothing mutates the host or a guest:
-the helper copies that stage a guest helper are skipped, and a helper
-execution follows a copy in the same run, so a check-mode run executes no
-guest helper at all.
+*** Check mode skips every mutating task and still verifies
+The host-side probes run, and so do the three verify tasks: the host bind
+identity check and the two guest verifications, each marked check mode
+false. The guest verifications execute the helper's read-only work inline
+through the machine's exec, so a check run stages nothing in a guest and
+the helper lifecycle is untouched. Check mode is a converged-state
+verifier, not a preview of changes: it stops on the same refusals a real
+run raises and does not guest-verify a stopped machine.

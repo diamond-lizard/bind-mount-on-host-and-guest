@@ -2194,6 +2194,7 @@
         label: "{{ item.machine }}:{{ item.name }}"
       register: host_verify
       changed_when: false
+      check_mode: false
       failed_when: host_verify.rc != 0
       when: config.mode == 'bind'
       tags: [verify]
@@ -2207,16 +2208,22 @@
           - "{{ item.machine }}"
           - --
           - python3
-          - "{{ helper_dir_guest_path }}/guest-verify-one.py"
+          - -c
+          - "{{ verify_helper_text }}"
           - bind
           - "{{ item.target }}"
           - "{{ item.share_path }}"
           - "{{ item.readonly | string | lower }}"
+      vars:
+        # The same file the mount path stages, executed inline so that a check
+        # run stages nothing; keep the file free of Jinja braces.
+        verify_helper_text: "{{ lookup('file', playbook_dir ~ '/files/guest-verify-one.py') }}"
       loop: "{{ all_mounts }}"
       loop_control:
         label: "{{ item.machine }}:{{ item.target }}"
       register: guest_verify_bind
       changed_when: false
+      check_mode: false
       failed_when: guest_verify_bind.rc != 0
       when:
         - config.mode == 'bind'
@@ -2233,14 +2240,18 @@
           - "{{ item.machine }}"
           - --
           - python3
-          - "{{ helper_dir_guest_path }}/guest-verify-one.py"
+          - -c
+          - "{{ verify_helper_text }}"
           - direct
           - "{{ item.target }}"
+      vars:
+        verify_helper_text: "{{ lookup('file', playbook_dir ~ '/files/guest-verify-one.py') }}"
       loop: "{{ all_mounts }}"
       loop_control:
         label: "{{ item.machine }}:{{ item.target }}"
       register: direct_verify
       changed_when: false
+      check_mode: false
       failed_when: direct_verify.rc != 0
       when:
         - config.mode == 'direct'

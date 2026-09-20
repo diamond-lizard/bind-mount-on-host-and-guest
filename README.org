@@ -312,10 +312,18 @@ so a reader never sees a partial file. The profile helper preserves the
 file owner and mode and never touches lines outside the managed block,
 which uses the standard blockinfile markers.
 *** Check mode skips every mutating task and still verifies
-Nothing that mutates the host or a guest runs: the helper copies that
-stage a guest helper are skipped, and a helper execution follows a copy in
-the same run, so a check-mode run executes no guest helper. The host-side
-probes still run.
+No volume change, mount, install, or stale-state removal runs. The
+read-only checks do: the host-side probes, the host bind identity check,
+and both guest verifications. The guest checks run the same read-only
+work the mount phase stages, but inline through the machine's exec, so a
+check-mode run writes nothing and leaves nothing in a guest. Check mode
+asserts that the current state satisfies the contract; it does not
+predict changes, so on a state that is not converged it stops with the
+same refusals a real run raises: a pending volume change on a running
+machine, an unknown machine state, a volume the ledger cannot prove, an
+exceeded volume budget, a missing source, or a stopped machine whose
+mounts are requested. A stopped machine is not guest-verified, because
+the guest checks need a running machine.
 ** Shutdown semantics
 smolvm machine stop is graceful: the guest agent runs a full sync, flushing
 every filesystem including virtiofs, remounts the storage read-only to
