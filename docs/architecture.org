@@ -27,11 +27,15 @@ share_root holds one subdirectory per mount; each is bind-mounted from its
 source on the host. The ledger file .bind-mounts-state.yml records everything
 the playbook created.
 *** Guest-side artifacts
-Three per machine: the root-owned script at the configured script path
+Four per machine: the root-owned script at the configured script path
 (by default /usr/local/sbin/bind-mount-on-guest.sh), the sudoers drop-in
 at the configured path (by default /etc/sudoers.d/010-bind-mounts, in a
-directory the guest's sudoers includes), and the managed block in the
-primary user profile. That
+directory the guest's sudoers includes), the managed block in the
+primary user profile, and the helper copies under the configured helper
+directory (/tmp/010-bind-mounts-helpers by default). The helpers live
+only for the length of a run: they are copied root-owned immediately
+before each use, and the run that used them removes them again. The
+directory sits in the guest's tmpfs /tmp, so a shutdown clears it too. That
 block carries bind-mounts-specific markers, so a block that another
 role's blockinfile wrote into the same profile is never matched, edited,
 or removed.
@@ -69,8 +73,9 @@ attaches the share volume to a stopped machine that lacks it and halts with
 an ACTION REQUIRED message when a running machine needs volume changes; the
 attach tag converges volumes explicitly on stopped machines.
 *** Direct mode
-One volume per configured mount, managed by machine update, with no
-guest-side artifacts and nothing to run at login. Subject to the volume
+One volume per configured mount, managed by machine update, with nothing
+to run at login and no guest-side artifacts beyond the helper copy a run
+makes for its own length. Subject to the volume
 ceiling.
 *** Switching between modes
 Stop the machines, change mode in the configuration, and run the default
@@ -245,3 +250,7 @@ before the budget check.
 *** Missing or non-directory sources fail before any mutation
 *** Corrupt sudoers content is rejected before activation
 *** Check mode skips every mutating task
+The host-side probes still run, but nothing mutates the host or a guest:
+the helper copies that stage a guest helper are skipped, and a helper
+execution follows a copy in the same run, so a check-mode run executes no
+guest helper at all.

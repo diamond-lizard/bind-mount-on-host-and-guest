@@ -19,6 +19,10 @@
     installed_script_guest_path: /usr/local/sbin/bind-mount-on-guest.sh
     sudoers_dropin_guest_path: /etc/sudoers.d/010-bind-mounts
     sudoers_staging_guest_path: "/tmp/{{ sudoers_dropin_guest_path | basename }}"
+    # The guest helpers are staged here, root-owned, for the length of a run.
+    # The directory sits on the guest's tmpfs /tmp, so a shutdown clears it,
+    # and every use is preceded by a fresh copy.
+    helper_dir_guest_path: /tmp/010-bind-mounts-helpers
     ledger_file_name: .bind-mounts-state.yml
     # The machine states the running/stopped comparisons in this playbook
     # understand. Any other token takes their "neither" path, so the prelude
@@ -79,11 +83,15 @@
           - sudoers_staging_guest_path is match('/')
           - sudoers_staging_guest_path is not search('\\s')
           - sudoers_staging_guest_path != sudoers_dropin_guest_path
+          - helper_dir_guest_path is match('/')
+          - helper_dir_guest_path is not search('\\s')
+          - helper_dir_guest_path | basename | length > 0
         msg: >-
           installed_script_guest_path and sudoers_dropin_guest_path must be
           absolute paths without whitespace, ending in a file name; the guest
           staging path must be absolute, whitespace-free, and different from
-          the drop-in destination.
+          the drop-in destination; the helper directory must be an absolute,
+          whitespace-free path with a file name as its last segment.
       tags: [always]
 
     - name: Normalize limit_machines
@@ -1715,7 +1723,18 @@
           - --
           - sh
           - -c
-          - "[ -e {{ sudoers_staging_guest_path }} ] || [ -e /tmp/profile-manage.py ]; stale=$?; rm -f {{ sudoers_staging_guest_path }} /tmp/profile-manage.py; exit $stale"
+          - >-
+            stale=1;
+            {% if config.mode == 'bind' %}
+            [ -e {{ sudoers_staging_guest_path }} ] && { rm -f {{ sudoers_staging_guest_path }}; stale=0; };
+            [ -e /tmp/profile-manage.py ] && { rm -f /tmp/profile-manage.py; stale=0; };
+            {% endif %}
+            for f in {{ helper_dir_guest_path }}/guest-mount-one.py
+            {{ helper_dir_guest_path }}/guest-verify-one.py
+            /tmp/guest-mount-one.py /tmp/guest-verify-one.py;
+            do case "$(head -n2 "$f" 2>/dev/null)" in
+            *"Managed by bind-mounts.yml"*) rm -f "$f"; stale=0;; esac; done;
+            exit $stale
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -1724,7 +1743,6 @@
       changed_when: guest_temp_clean.rc == 0
       failed_when: guest_temp_clean.rc not in [0, 1]
       when:
-        - config.mode == 'bind'
         - smolvm_sections[m.name].state == 'running'
         - not ansible_check_mode
       tags: [install]
@@ -1732,8 +1750,31 @@
     # ================================================================
     # 8. Guest bind mounts (bind mode)
     # ================================================================
+    - name: Create the guest helper directory
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - sh
+          - -c
+          - "mkdir -p {{ helper_dir_guest_path }} && chown root:root {{ helper_dir_guest_path }} && chmod 0700 {{ helper_dir_guest_path }}"
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: helper_dir_create
+      changed_when: helper_dir_create.rc == 0
+      when:
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts, verify]
+
     - name: Copy the mount helper into each running machine
-      ansible.builtin.command: "smolvm machine cp {{ playbook_dir }}/files/guest-mount-one.py {{ m.name }}:/tmp/guest-mount-one.py"
+      ansible.builtin.command: "smolvm machine cp {{ playbook_dir }}/files/guest-mount-one.py {{ m.name }}:{{ helper_dir_guest_path }}/guest-mount-one.py"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
@@ -1747,13 +1788,41 @@
       tags: [mounts]
 
     - name: Copy the verify helper into each running machine
-      ansible.builtin.command: "smolvm machine cp {{ playbook_dir }}/files/guest-verify-one.py {{ m.name }}:/tmp/guest-verify-one.py"
+      ansible.builtin.command: "smolvm machine cp {{ playbook_dir }}/files/guest-verify-one.py {{ m.name }}:{{ helper_dir_guest_path }}/guest-verify-one.py"
       loop: "{{ normalized }}"
       loop_control:
         loop_var: m
         label: "{{ m.name }}"
       register: verify_helper_copy
       changed_when: verify_helper_copy.rc == 0
+      when:
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [mounts, verify]
+
+    - name: Own the copied guest helpers
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - sh
+          - -c
+          - >-
+            for f in {{ helper_dir_guest_path }}/guest-mount-one.py
+            {{ helper_dir_guest_path }}/guest-verify-one.py;
+            do if [ -f "$f" ]; then chown root:root "$f" && chmod 0600 "$f" || exit 1; fi; done;
+            exit 0
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: helper_own
+      changed_when: false
+      failed_when: helper_own.rc not in [0]
       when:
         - smolvm_sections[m.name].state == 'running'
         - not ansible_check_mode
@@ -1841,7 +1910,7 @@
           - "{{ item.machine }}"
           - --
           - python3
-          - /tmp/guest-mount-one.py
+          - "{{ helper_dir_guest_path }}/guest-mount-one.py"
           - "{{ item.target }}"
           - "{{ item.share_path }}"
           - "{{ item.uid_eff | string }}"
@@ -2017,7 +2086,7 @@
           - "{{ item.machine }}"
           - --
           - python3
-          - /tmp/guest-mount-one.py
+          - "{{ helper_dir_guest_path }}/guest-mount-one.py"
           - "{{ item.target }}"
           - "{{ item.share_path }}"
           - "{{ item.uid_eff | string }}"
@@ -2138,7 +2207,7 @@
           - "{{ item.machine }}"
           - --
           - python3
-          - /tmp/guest-verify-one.py
+          - "{{ helper_dir_guest_path }}/guest-verify-one.py"
           - bind
           - "{{ item.target }}"
           - "{{ item.share_path }}"
@@ -2164,7 +2233,7 @@
           - "{{ item.machine }}"
           - --
           - python3
-          - /tmp/guest-verify-one.py
+          - "{{ helper_dir_guest_path }}/guest-verify-one.py"
           - direct
           - "{{ item.target }}"
       loop: "{{ all_mounts }}"
@@ -2187,6 +2256,37 @@
         label: "{{ m.name }}"
       when: smolvm_sections[m.name].state != 'running'
       tags: [verify]
+
+    - name: Remove the guest helper copies
+      ansible.builtin.command:
+        argv:
+          - smolvm
+          - machine
+          - exec
+          - --name
+          - "{{ m.name }}"
+          - --
+          - sh
+          - -c
+          - >-
+            stale=1;
+            for f in {{ helper_dir_guest_path }}/guest-mount-one.py
+            {{ helper_dir_guest_path }}/guest-verify-one.py;
+            do case "$(head -n2 "$f" 2>/dev/null)" in
+            *"Managed by bind-mounts.yml"*) rm -f "$f"; stale=0;; esac; done;
+            rmdir {{ helper_dir_guest_path }} 2>/dev/null;
+            exit $stale
+      loop: "{{ normalized }}"
+      loop_control:
+        loop_var: m
+        label: "{{ m.name }}"
+      register: helper_cleanup
+      changed_when: helper_cleanup.rc == 0
+      failed_when: helper_cleanup.rc not in [0, 1]
+      when:
+        - smolvm_sections[m.name].state == 'running'
+        - not ansible_check_mode
+      tags: [install, mounts, verify]
 
     # ================================================================
     # 10. Ledger write

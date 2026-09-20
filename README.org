@@ -212,7 +212,9 @@ changes the volume set.
 *** stop syncs each guest and stops the machines
 Tolerates machines that are already stopped.
 *** teardown undoes everything the playbook created
-Direct-mode volume removal requires stopped machines.
+Direct-mode volume removal requires stopped machines. Guest helper copies
+are the exception: the run that used them removes them, and a shutdown
+clears them with the guest's tmpfs /tmp.
 
 attach, stop, and teardown are excluded from the default run; select them
 explicitly with --tags. Only the default run and --tags attach converge a
@@ -250,7 +252,10 @@ binds, guest binds, and installed artifacts per machine. It records those
 artifacts by kind, not by path, so changed installed_script_guest_path or
 sudoers_dropin_guest_path values leave a copy at the old path behind and
 untracked; the removals act only on the paths the current configuration
-names. Its volume record
+names. The guest helper copies are not in the ledger at all: they are
+staged under the configured helper directory and removed by the run that
+used them, and such a removal touches a file only when it carries the
+helpers' ownership marker. Its volume record
 names each source as the canonical host path, and is written again as soon
 as a run applies a volume change, so a run that fails before the final
 ledger write still describes the volumes that are
@@ -307,6 +312,10 @@ so a reader never sees a partial file. The profile helper preserves the
 file owner and mode and never touches lines outside the managed block,
 which uses the standard blockinfile markers.
 *** Check mode skips every mutating task and still verifies
+Nothing that mutates the host or a guest runs: the helper copies that
+stage a guest helper are skipped, and a helper execution follows a copy in
+the same run, so a check-mode run executes no guest helper. The host-side
+probes still run.
 ** Shutdown semantics
 smolvm machine stop is graceful: the guest agent runs a full sync, flushing
 every filesystem including virtiofs, remounts the storage read-only to
