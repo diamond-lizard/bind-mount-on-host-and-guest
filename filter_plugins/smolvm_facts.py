@@ -4,10 +4,13 @@ import re
 
 
 class FilterModule(object):
-    """Ansible filters for parsing `smolvm machine ls --verbose` output."""
+    """Ansible filters for parsing and validating `smolvm machine ls --verbose` output."""
 
     def filters(self):
-        return {"smolvm_ls_sections": self.smolvm_ls_sections}
+        return {
+            "smolvm_ls_sections": self.smolvm_ls_sections,
+            "smolvm_unknown_states": self.smolvm_unknown_states,
+        }
 
     @staticmethod
     def smolvm_ls_sections(text):
@@ -62,3 +65,27 @@ class FilterModule(object):
                     }
                 )
         return sections
+
+    @staticmethod
+    def smolvm_unknown_states(sections, known, only=None):
+        """List machines whose state is outside the caller's vocabulary.
+
+        Returns ``"<machine> (<state>)"`` strings for every machine whose state
+        token is not one of the ``known`` states::
+
+            ["my-vm (hibernating)"]
+
+        ``sections`` is the dict returned by ``smolvm_ls_sections``. ``only``
+        restricts the report to those machine names, and names missing from the
+        parsed inventory are ignored: pass the machines the run reads state for,
+        so a machine the run never touches cannot fail it. The parser stores
+        state tokens verbatim, so this filter is how a run notices that smolvm
+        renamed or added a state before the running and stopped comparisons in
+        the playbook silently pick a branch.
+        """
+        names = sections.keys() if only is None else only
+        return [
+            f"{name} ({sections[name]['state']})"
+            for name in sorted(set(names))
+            if name in sections and sections[name]["state"] not in known
+        ]

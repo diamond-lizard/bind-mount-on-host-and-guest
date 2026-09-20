@@ -20,6 +20,10 @@
     sudoers_dropin_guest_path: /etc/sudoers.d/010-bind-mounts
     sudoers_staging_guest_path: "/tmp/{{ sudoers_dropin_guest_path | basename }}"
     ledger_file_name: .bind-mounts-state.yml
+    # The machine states the running/stopped comparisons in this playbook
+    # understand. Any other token takes their "neither" path, so the prelude
+    # refuses it; adding one here means auditing every state comparison.
+    smolvm_known_states: [running, stopped]
   tasks:
 
     # ================================================================
@@ -323,6 +327,38 @@
           ledger file to re-enable cleanup.
       when: not ledger_usable
       tags: [always]
+
+    # Every start, stop, volume and verification decision below reads the
+    # machine state, and each comparison understands only smolvm_known_states:
+    # smolvm reports more states than those two, and a token outside the
+    # vocabulary takes the "neither running nor stopped" path, where the volume
+    # applies that require a stopped machine are skipped while the refusals
+    # that gate a running one stay quiet - so a live machine could still take
+    # volume changes. Refuse the run instead. Scoped to the machines this run
+    # reads state for (the configured ones plus the ones the ledger names, both
+    # consulted through smolvm_sections), so a machine this run never touches
+    # cannot fail it; the scope is why the check sits after the ledger load and
+    # before the first state comparison.
+    - name: Fail on machine states this playbook does not understand
+      vars:
+        state_checked_machines: >-
+          {{ (normalized | map(attribute='name') | list)
+             + (ledger.machines | default({}) | dict2items | map(attribute='key') | list) }}
+        unknown_machine_states: >-
+          {{ smolvm_sections | smolvm_unknown_states(smolvm_known_states, state_checked_machines) }}
+      ansible.builtin.assert:
+        that: unknown_machine_states | length == 0
+        msg: >-
+          smolvm reports state(s) this playbook does not understand:
+          {{ unknown_machine_states | join(', ') }}. It reads every start, stop,
+          volume and verification decision from the machine state and knows only
+          {{ smolvm_known_states | join(' and ') }}; any other token would be
+          treated as neither running nor stopped, which can change the volumes
+          of a machine that is running. Bring the machine into a running or
+          stopped state, or teach this playbook's state comparisons the new
+          token, before re-running.
+      tags: [always]
+
     - name: Compute the volume convergence plan per machine
       ansible.builtin.set_fact:
         volume_plans: >-
@@ -1141,6 +1177,8 @@
       changed_when: false
       tags: [start]
 
+    # Re-read the inventory after the start so the gates below see the current
+    # states (the vocabulary check ran on the first parse).
     - name: Refresh the machine inventory after starting
       ansible.builtin.command: smolvm machine ls --verbose
       register: smolvm_ls
