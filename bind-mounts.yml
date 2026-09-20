@@ -944,7 +944,7 @@
             sys.exit(10)
           - "{{ item.src }}"
           - "{{ share_root_resolved ~ '/' ~ item.name }}"
-          - "{{ (ledger.machines | default({})).get(item.machine, {}).get('host_binds', []) | selectattr('target', 'eq', share_root_resolved ~ '/' ~ item.name) | map(attribute='source') | first | default('') }}"
+          - "{{ (ledger.machines | default({})).get(item.machine, {}).get('host_binds', []) | selectattr('target', 'eq', share_root_resolved ~ '/' ~ item.name) | selectattr('observed', 'defined') | map(attribute='source') | first | default('') }}"
           - "{{ item.machine }}"
           - "{{ smolvm_sections[item.machine].state }}"
           - "{{ item.target }}"
@@ -1142,6 +1142,12 @@
         - host_bind.results[ansible_loop.index0].changed | default(false)
         - not ansible_check_mode
       tags: [mounts]
+
+    - name: Record the host bind facts this run observed
+      ansible.builtin.include_tasks: tasks/record-bind-ledger.yml
+      vars:
+        bind_record_lane: host
+      tags: [always]
 
     # ================================================================
     # 5. Machine start
@@ -1854,6 +1860,12 @@
         - not ansible_check_mode
       tags: [mounts]
 
+    - name: Record the guest bind facts this run observed
+      ansible.builtin.include_tasks: tasks/record-bind-ledger.yml
+      vars:
+        bind_record_lane: guest
+      tags: [always]
+
     - name: Collect guest binds the helper could not converge
       ansible.builtin.set_fact:
         guest_mount_failed: >-
@@ -1912,7 +1924,7 @@
           {%- set mounts = {'volume': [], 'unproven': [], 'proven': []} -%}
           {%- for r in guest_mount_result.results | default([]) -%}
           {%- if r.rc is defined and r.rc == 3 -%}
-          {%- set proof = (ledger.machines | default({})).get(r.item.machine, {}).get('guest_binds', []) | selectattr('target', 'eq', r.item.target) | list | length -%}
+          {%- set proof = (ledger.machines | default({})).get(r.item.machine, {}).get('guest_binds', []) | selectattr('target', 'eq', r.item.target) | selectattr('observed', 'defined') | list | length -%}
           {%- if r.item.target in (vol_targets[r.item.machine] | default([])) -%}
           {%- set _ = mounts.volume.append(r.item) -%}
           {%- set vol_src = smolvm_sections[r.item.machine].mounts | selectattr('target', 'eq', r.item.target) | map(attribute='src') | first -%}
@@ -2022,6 +2034,12 @@
         - smolvm_sections[item.machine].state == 'running'
         - not ansible_check_mode
       tags: [mounts]
+
+    - name: Record the guest bind facts this run observed
+      ansible.builtin.include_tasks: tasks/record-bind-ledger.yml
+      vars:
+        bind_record_lane: guest
+      tags: [always]
 
     - name: Collect stopped machines that still need guest bind mounts
       ansible.builtin.set_fact:
@@ -2184,20 +2202,16 @@
           {%- endif -%}
           {%- endfor -%}
           {%- for m in normalized -%}
-          {%- set mounts = all_mounts | selectattr('machine', 'eq', m.name) | list -%}
-          {%- set host_binds = [] -%}
-          {%- set guest_binds = [] -%}
+          {%- set entry = (ledger.machines | default({})).get(m.name, {}) -%}
           {%- set volumes = [] -%}
-          {%- for mnt in mounts -%}
-          {%- set _ = host_binds.append({'target': share_root_resolved ~ '/' ~ mnt.name, 'source': mnt.src}) -%}
-          {%- set _ = guest_binds.append({'target': mnt.target, 'source': mnt.share_path}) -%}
+          {%- for mnt in all_mounts | selectattr('machine', 'eq', m.name) -%}
           {%- set _ = volumes.append({'src': mnt.src, 'target': mnt.target, 'readonly': mnt.readonly}) -%}
           {%- endfor -%}
           {%- set _ = machines_out.update({m.name: {
                 'share_volume': config.mode == 'bind',
                 'volumes': volumes if config.mode == 'direct' else [],
-                'guest_binds': guest_binds if config.mode == 'bind' else [],
-                'host_binds': host_binds if config.mode == 'bind' else [],
+                'guest_binds': entry.get('guest_binds', []) if config.mode == 'bind' else [],
+                'host_binds': entry.get('host_binds', []) if config.mode == 'bind' else [],
                 'installed': {
                   'script': config.mode == 'bind',
                   'sudoers': config.mode == 'bind',

@@ -109,23 +109,41 @@ machines:
     host_binds:
       - target: /home/you/share/website
         source: /home/you/projects/website
+        observed: matched
     guest_binds:
       - target: /home/you/projects/website
         source: /mnt/share/website
+        observed: matched
     installed:
       script: true
       sudoers: true
       bash_profile_block: true
 #+END_SRC
-*** First-run adoption verifies and records matching mounts
+*** Volumes at configured targets need ledger proof
 A volume the configuration does not want at a target it names is left
 alone while the ledger is unreadable, and refused once the ledger is
 usable and cannot prove it; a volume where the configuration wants a
 different one is refused whether or not the ledger is readable.
+*** Bind facts record what a run observed
+The host-bind probe, the bind this run creates, the guest mount helper and
+the re-mount after a remediation are the observations the bind entries are
+written from, at the mount sites, so a run that unmounts a bind and then
+fails still leaves the ledger without that claim. Each entry carries the
+observation behind it (matched: found bound from the source; mounted: this
+run created it), and the probe's ledger proof and the guest refusal
+classification require that marker, so an unmarked entry cannot authorize a
+removal. A machine whose lane the run did not observe keeps its previous
+entries: the file records observations, and a run that did not look does not
+rewrite them. A stopped machine proves nothing about guest binds: a guest
+bind does not survive a stop, so a stopped machine's guest lane is cleared
+rather than carried, while the host-side layer and the volumes stay
+observable.
 *** Ledger writes are not only final
 The volume fields are rewritten by temp file and rename whenever a
 machine's volume set changes, so a run that stops before its final ledger
-write still records what it attached.
+write still records what it attached. The bind fields are rewritten the same
+way at the mount sites, so a run that stops after unmounting a bind leaves
+the ledger without that claim.
 *** Stale entries are unmounted, pruned, and removed from the volume set
 Guest binds are unmounted deep first, host binds are unmounted, empty
 subdirectories are pruned, and volumes are removed with machine update.

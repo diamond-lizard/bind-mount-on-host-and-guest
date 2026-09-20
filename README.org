@@ -7,7 +7,7 @@ that shares host directories with
 One default run validates the configuration, attaches the configured
 host directories to each machine, bind-mounts them at their target
 paths inside each guest, installs a login hook that re-applies the
-mounts, verifies every mount, and records everything it created in a
+mounts, verifies every mount, and records what it observed in a
 provenance ledger.
 
 The playbook manages any number of machines and users from the same
@@ -244,7 +244,7 @@ still count against max_volumes.
 For step-by-step control you can still converge explicitly with --tags
 attach after stopping, and start the machines with --tags start.
 ** Safety model
-*** The provenance ledger records everything the playbook creates
+*** The provenance ledger records what each run observes
 The ledger lives beside the share subdirectories and records volumes, host
 binds, guest binds, and installed artifacts per machine. It records those
 artifacts by kind, not by path, so changed installed_script_guest_path or
@@ -253,16 +253,25 @@ untracked; the removals act only on the paths the current configuration
 names. Its volume record
 is written again as soon as a run applies a volume change, so a run that
 fails before the final ledger write still describes the volumes that are
-attached. Entries that are in the ledger and in the configuration are
-maintained; entries in the ledger but no longer in the configuration are
-removed; anything else is foreign and never touched, except a volume the
-configuration does not want at a target it names, which is refused while
-the ledger is usable. On the first run, existing mounts that match the
-configuration are verified and adopted into the ledger.
+attached. A bind enters the ledger only as an observation: the host-bind
+probe found the target bound from that source, this run created the bind, or
+the guest mount helper reported the target bound from the share path. Each
+such entry carries the observation behind it, and the tasks that remediate a
+bind act only on entries that carry one, so an entry from an older run - or
+one from a run that could not look - is not treated as proof. A stopped
+machine proves nothing about guest binds: a guest bind does not survive a
+stop, so a run that finds a machine stopped records no guest-bind facts for
+it, while the host-side layer and the volumes stay observable. Entries that
+are in the ledger and in the configuration are maintained; entries in the
+ledger but no longer in the configuration are removed; anything else is
+foreign and never touched, except a volume the configuration does not want at
+a target it names, which is refused while the ledger is usable.
 *** Foreign mounts are refused, never unmounted automatically
 A target already mounted with different content than the configured source
 fails the run with the found and expected device:inode identities printed,
-together with the manual resolution path. A volume the configuration does
+together with the manual resolution path. A bind the ledger does not
+evidence as observed is refused that way too, instead of being unmounted on
+the ledger's word. A volume the configuration does
 not want at a target it names, which the ledger cannot prove, is refused
 the same way while the ledger is usable; -e bind_mounts_force_remount=true
 accepts removing and replacing it, with the machine stopped.
