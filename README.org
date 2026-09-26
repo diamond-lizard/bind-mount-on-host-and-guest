@@ -289,7 +289,9 @@ Every check compares the device and inode of the mounted target against the
 configured source, so a stale or wrong-source mount is caught instead of
 silently skipped. Source-path comparison is deliberately avoided because the
 kernel reports bind sources in normalized form that cannot be matched by
-string equality.
+string equality. The one exception is the kernel's //deleted mount-root
+marker: the unlinked directory's inode can never be compared again, so
+such a bind is recognized by its path with the marker stripped.
 *** Volume changes fail on running machines instead of stopping them
 The attach tag refuses running machines and prints the exact commands to run;
 the playbook never stops a machine with live sessions on its own.
@@ -388,7 +390,11 @@ the guest binds at every login through passwordless sudo.
 *** A target mounted with a different source is remediated or refused
 A proven-stale bind is unmounted and re-bound from the configured source
 while the machine is stopped; a running machine halts the run with an
-ACTION REQUIRED message first (libkrun pins the old bind). When the ledger
+ACTION REQUIRED message first (libkrun pins the old bind). A bind whose
+source directory was deleted while it stayed mounted — the kernel marks
+its mount root //deleted — is treated as ours when the path minus that
+marker matches the configured or recorded source, and remediates on a
+stopped machine without force. When the ledger
 cannot prove the bind is ours, the run halts and lists every affected host
 and guest path; re-run with -e bind_mounts_force_remount=true to accept, or
 unmount manually. A volume the configuration does not want at a target it

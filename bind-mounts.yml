@@ -855,6 +855,18 @@
                 # findmnt reports a source as it was mounted, so one side of a
                 # comparison can be a symlinked path and the other resolved.
                 return os.path.realpath('/' + path.lstrip('/'))
+            def deleted_ours(source):
+                # The kernel renders a mount root whose backing directory was
+                # unlinked with a literal '//deleted' suffix (fs/d_path.c
+                # dentry_path). Such a layer is still ours when the path minus
+                # that suffix matches the configured source or the
+                # ledger-recorded source.
+                sp = subpath(source)
+                if not sp.endswith('//deleted'):
+                    return False
+                stripped = norm(sp[:-len('//deleted')])
+                return (stripped == norm(subpath(src))
+                        or bool(recorded) and stripped == norm(subpath(recorded)))
             try:
                 allow_raw = json.loads(allow_json or "[]")
             except ValueError:
@@ -879,18 +891,21 @@
                 return force == "true" and any(
                     sp == p or sp.startswith(p + '/') for p in allow_prefixes)
             def layer_removable(source):
-                return layer_provable(source) or layer_forced(source)
+                return layer_provable(source) or layer_forced(source) or deleted_ours(source)
             def layer_label(source):
                 sp = subpath(source)
                 if sp == subpath(src):
                     return "(configured source)"
                 if recorded and sp == subpath(recorded):
                     return "(ledger-recorded)"
+                if deleted_ours(source):
+                    return "(ours; source directory deleted)"
                 spn, srn = norm(sp), norm(share_root.rstrip('/'))
                 if spn == srn or spn.startswith(srn + '/'):
                     return "(under the share root)"
                 if layer_forced(source):
                     return "(allowed by force)"
+                    return "(ours; source directory deleted)"
                 return "(not ours)"
             def layer_display(source, suffix=""):
                 # Show the path an operator recognizes first. Keep the device
@@ -912,10 +927,11 @@
             opts = findmnt("OPTIONS").stdout.splitlines()[0]
             ro_now = "ro" in opts.split(",")
             print(f"RO-STATE: {'ro' if ro_now else 'rw'}")
+            deleted = any(deleted_ours(l) for l in layers)
             src_id, tgt_id = stat_id(src), stat_id(tgt)
             matched = src_id is not None and src_id == tgt_id
             rec_id = stat_id(recorded) if recorded else None
-            ours = rec_id is not None and rec_id == tgt_id
+            ours = (rec_id is not None and rec_id == tgt_id) or deleted
             if matched and len(layers) == 1:
                 print(f"OK: {tgt} bound from {src}")
                 sys.exit(0)
@@ -924,7 +940,9 @@
                 print(f"OK: {tgt} top layer bound from {src}")
                 sys.exit(0)
             if state == "running":
-                why = "proven ours by ledger" if ours else "not proven by the ledger"
+                why = ("proven ours, but the source directory was deleted" if deleted
+                       else "proven ours by ledger" if ours
+                       else "not proven by the ledger")
                 print(f"ACTION REQUIRED: stale bind at {tgt} ({why}) cannot be replaced while machine {machine} is running.", file=sys.stderr)
                 print(f"ACTION REQUIRED:   smolvm machine stop --name {machine}", file=sys.stderr)
                 print("ACTION REQUIRED: then re-run this playbook; the stale bind is remediated while the machine is stopped.", file=sys.stderr)
@@ -974,7 +992,7 @@
             if mount_lines():
                 print(f"REFUSED: {tgt} is still stacked after 10 attempts; stopping", file=sys.stderr)
                 sys.exit(3)
-            why = "collapsed stack" if matched else ("proven ours by ledger" if ours else "forced by user")
+            why = "collapsed stack" if matched else ("the source directory was deleted" if deleted else "proven ours by ledger" if ours else "forced by user")
             print(f"REMEDIATED: stale bind at {tgt} cleared ({why}); re-binding from {src}")
             sys.exit(10)
           - "{{ item.src }}"
