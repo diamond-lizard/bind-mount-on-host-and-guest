@@ -127,7 +127,11 @@ run halts and names every affected host and guest path. Re-run with
 replaces the listed mounts. Forcing also requires a stopped machine for
 the same libkrun reason. Every stack layer is individually
 ownership-checked, so force on its own accepts only layers the playbook
-can prove it created.
+can prove it created. One bind is proven without the ledger: a mount root
+the kernel marks //deleted - its source directory was deleted while it
+stayed mounted - is playbook-owned when the path minus the marker matches
+the configured or recorded source, and remediates on a stopped machine
+without force, so it never reaches this refusal.
 
 A layer it cannot prove, such as one left behind by an earlier layout
 or mounted by hand, is accepted when its path is named in
