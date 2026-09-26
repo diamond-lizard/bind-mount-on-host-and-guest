@@ -1045,6 +1045,16 @@
           {%- endif -%}
           {%- endfor -%}
           {{ c }}
+        probe_allow_specs: >-
+          {%- set c = [] -%}
+          {%- for r in host_bind_probe.results -%}
+          {%- if r.rc is defined and r.rc == 3 -%}
+          {%- for line in r.stdout_lines | default([]) if line.startswith('ALLOW-PREFIX: ') -%}
+          {%- set _ = c.append(line[14:].strip()) -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ c | unique | list }}
         probe_refused_detail: >-
           {%- set out = [] -%}
           {%- for r in host_bind_probe.results -%}
@@ -1093,7 +1103,9 @@
              + ['%-70s' | format('')]
              + ['%-70s' | format('      Add this to the command you just ran, then run it again:')]
              + ['%-70s' | format('')]
-             + ['%-70s' | format('          -e bind_mounts_force_remount=true')]
+             + ['%-70s' | format('          -e bind_mounts_force_remount=true'
+                                 ~ ('' if probe_allow_specs | length == 0 else
+                                    ' -e bind_mounts_force_allow_prefixes=' ~ (probe_allow_specs | join(','))))]
              + ['%-70s' | format('')]
              + ['%-70s' | format('      That unmounts the accepted layers and creates the bind'),
                 '%-70s' | format('      again from the directory marked (configured source).')]
